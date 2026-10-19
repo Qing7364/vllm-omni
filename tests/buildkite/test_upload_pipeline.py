@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 from __future__ import annotations
 
+import ast
 import copy
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -664,86 +668,88 @@ def test_source_file_dependencies_key_expands_from_registry() -> None:
     assert "Diffusion · Qwen Image Test" not in _surviving_labels(doc, ["vllm_omni/unrelated.py"])
 
 
+@pytest.mark.parametrize("pipeline", ["test-ready.yml", "test-merge.yml", "test-nightly.yml"])
+def test_sensenova_accuracy_is_not_in_daily_pipelines(pipeline: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MIRROR_HW", raising=False)
+    path = Path(".buildkite/cuda") / pipeline
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    rendered = _render_test_pipeline(doc, changed_files=None, pipeline_path=path)
+    assert not any("SenseNova-U1" in step.get("label", "") for step in _iter_steps(rendered))
+
+
+@pytest.mark.parametrize("mode", ["text2img", "img2img"])
+def test_sensenova_accuracy_uses_weekly_mark(mode: str) -> None:
+    path = Path(f"tests/e2e/offline_inference/test_sensenova_u1_{mode}_expansion.py")
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    case = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == f"test_sensenova_u1_{mode}_pixel_accuracy"
+    )
+    marks = {ast.unparse(mark) for mark in case.decorator_list}
+    assert "pytest.mark.slow" in marks
+    assert not marks & {"pytest.mark.core_model", "pytest.mark.advanced_model", "pytest.mark.full_model"}
+
+
 @pytest.mark.parametrize(
-    ("changed_file", "selected"),
-    [
-        ("vllm_omni/diffusion/models/qwen_image/pipeline_qwen_image.py", False),
-        ("vllm_omni/diffusion/models/wan2_2/pipeline_wan2_2.py", False),
-        ("vllm_omni/model_executor/models/qwen3_omni/qwen3_omni.py", False),
-        ("vllm_omni/diffusion/models/sensenova_u1/pipeline_sensenova_u1.py", True),
-        ("vllm_omni/transformers_utils/configs/sensenova_u1.py", True),
-        ("vllm_omni/model_extras/sensenova_u1.py", True),
-        ("tests/e2e/offline_inference/test_sensenova_u1_text2img_expansion.py", True),
-        ("tests/e2e/offline_inference/test_sensenova_u1_img2img_expansion.py", True),
-        ("tests/e2e/accuracy/sensenova_u1.py", True),
-        ("tests/e2e/accuracy/sensenova_u1_reference.json", True),
-        ("vllm_omni/diffusion/attention/layer.py", True),
-        ("vllm_omni/diffusion/layers/fused_moe.py", True),
-        ("vllm_omni/diffusion/worker/diffusion_model_runner.py", True),
-        ("vllm_omni/engine/async_omni_engine.py", True),
-        ("vllm_omni/entrypoints/omni.py", True),
-        ("vllm_omni/entrypoints/client_request_state.py", True),
-        ("vllm_omni/entrypoints/utils.py", True),
-        ("vllm_omni/inputs/data.py", True),
-        ("vllm_omni/transformers_utils/repo_utils.py", True),
-        ("vllm_omni/platforms/__init__.py", True),
-        ("vllm_omni/platforms/cuda/platform.py", True),
-        ("vllm_omni/diffusion/model_metadata.py", True),
-        ("vllm_omni/diffusion/io_support.py", True),
-        ("vllm_omni/diffusion/sched/request_scheduler.py", True),
-        ("requirements/common.txt", True),
-    ],
+    ("smoke_exit", "text2img_exit", "img2img_exit", "expected_exit"),
+    [(0, 0, 0, 0), (17, 0, 0, 17), (0, 23, 0, 23), (0, 0, 31, 31), (17, 23, 31, 17)],
 )
-def test_sensenova_accuracy_merge_source_filter(
-    monkeypatch: pytest.MonkeyPatch, changed_file: str, selected: bool
+def test_sensenova_weekly_runs_each_accuracy_case_once_and_preserves_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    smoke_exit: int,
+    text2img_exit: int,
+    img2img_exit: int,
+    expected_exit: int,
 ) -> None:
     monkeypatch.delenv("MIRROR_HW", raising=False)
-    path = Path(".buildkite/cuda/test-merge.yml")
+    path = Path(".buildkite/cuda/test-weekly.yml")
     doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-    labels = _surviving_labels(doc, [changed_file], pipeline_path=path)
-    assert ("Diffusion · SenseNova-U1 Pixel Accuracy" in labels) is selected
-
-
-def test_sensenova_accuracy_runtime_dependency_preserves_other_merge_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("MIRROR_HW", raising=False)
-    path = Path(".buildkite/cuda/test-merge.yml")
-    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-    changed_files = ["tests/helpers/runtime.py"]
-    labels = _surviving_labels(doc, changed_files, pipeline_path=path)
-    accuracy_label = "Diffusion · SenseNova-U1 Pixel Accuracy"
-    assert {accuracy_label, "Omni · Qwen3-Omni Async-Chunk SHM Leak"} <= labels
-
-    # The SHM job already matches runtime.py, so adding this dependency must not
-    # change fallback behavior or suppress any previously selected merge job.
-    step = next(step for step in _iter_steps(doc) if step.get("label") == accuracy_label)
-    step.pop("source_file_dependencies")
-    assert labels == _surviving_labels(doc, changed_files, pipeline_path=path)
-
-
-@pytest.mark.parametrize(("changed_files", "selected"), [(None, True), ([], False)])
-def test_sensenova_accuracy_merge_without_diff(
-    monkeypatch: pytest.MonkeyPatch, changed_files: list[str] | None, selected: bool
-) -> None:
-    monkeypatch.delenv("MIRROR_HW", raising=False)
-    path = Path(".buildkite/cuda/test-merge.yml")
-    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-    rendered = _render_test_pipeline(doc, changed_files=changed_files, pipeline_path=path)
-    labels = {step.get("label") for step in _iter_steps(rendered)}
-    assert ("Diffusion · SenseNova-U1 Pixel Accuracy" in labels) is selected
-
-
-def test_sensenova_accuracy_scheduled_e2e_bypasses_source_filter(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("MIRROR_HW", raising=False)
-
-    class Context:
-        changed_files = ["vllm_omni/diffusion/models/qwen_image/pipeline_qwen_image.py"]
-
-    path = Path(".buildkite/cuda/test-merge.yml")
-    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-    changed_files = _changed_files_for_source_filter(Context(), force_all=False, e2e_only=True)
-    rendered = _render_test_pipeline(doc, changed_files=changed_files, pipeline_path=path, e2e_only=True)
-    labels = {step.get("label") for step in _iter_steps(rendered)}
-    assert "Diffusion · SenseNova-U1 Pixel Accuracy" in labels
+    rendered = _render_test_pipeline(doc, changed_files=None, pipeline_path=path, e2e_only=True)
+    group = next(step for step in rendered["steps"] if "E2E" in step.get("group", ""))
+    assert group["if"] == 'build.env("NON_CRITICAL") == "1"'
+    steps = [step for step in _iter_steps(rendered) if "SenseNova-U1" in step.get("label", "")]
+    assert len(steps) == 1
+    step = steps[0]
+    assert step["artifact_paths"] == ["sensenova-accuracy/**/*"]
+    calls_path = tmp_path / "pytest-calls.jsonl"
+    # Run the actual weekly shell command with a lightweight pytest executable:
+    # this checks failure propagation without importing vLLM or requiring a GPU.
+    (tmp_path / "pytest").write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "with open(os.environ['PYTEST_CALLS'], 'a') as output:\n"
+        "    output.write(json.dumps({'args': sys.argv[1:], 'artifacts': os.environ.get('SENSENOVA_U1_ARTIFACT_DIR')}) + '\\n')\n"
+        "args = ' '.join(sys.argv[1:])\n"
+        "case = 'TEXT2IMG' if 'text2img_pixel_accuracy' in args else 'IMG2IMG' if 'img2img_pixel_accuracy' in args else 'SMOKE'\n"
+        "sys.exit(int(os.environ['EXIT_' + case]))\n"
+    )
+    (tmp_path / "pytest").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("PYTEST_CALLS", str(calls_path))
+    monkeypatch.setenv("BUILDKITE_COMMIT", "test-head")
+    for case, status in (("SMOKE", smoke_exit), ("TEXT2IMG", text2img_exit), ("IMG2IMG", img2img_exit)):
+        monkeypatch.setenv(f"EXIT_{case}", str(status))
+    # Hardware expansion prepends GPU runtime checks. Exercise the workload
+    # script itself here; Buildkite unescapes $$ before the agent executes it.
+    source_step = next(source for source in _iter_steps(doc) if source.get("label") == step["label"])
+    command = "\n".join(source_step["commands"]).replace("$$", "$")
+    result = subprocess.run(["bash", "-e", "-c", command], cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == expected_exit, result.stderr
+    calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
+    assert len(calls) == 3
+    assert all(call["artifacts"] == "sensenova-accuracy" for call in calls)
+    smoke_args = calls[0]["args"]
+    assert smoke_args[smoke_args.index("-k") + 1] == "not pixel_accuracy"
+    for call, mode in zip(calls[1:], ("text2img", "img2img")):
+        args = call["args"]
+        assert args[1] == (
+            f"tests/e2e/offline_inference/test_sensenova_u1_{mode}_expansion.py"
+            f"::test_sensenova_u1_{mode}_pixel_accuracy"
+        )
+        assert args[args.index("-m") + 1] == "slow and diffusion and cuda and H100 and cards_1"
+        assert args[args.index("--run-level") + 1] == "full_model"
 
 
 def test_registry_lists_pytest_targets() -> None:

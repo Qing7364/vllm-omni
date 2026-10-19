@@ -5,11 +5,11 @@
 End-to-end test for SenseNova-U1 img2img generation.
 
 Weekly smoke coverage checks that image editing succeeds with the expected size.
-Pixel accuracy runs separately in the H100 ``advanced_model`` gate with a pinned
+Pixel accuracy runs in a separate process in the weekly H100 job with a pinned
 model revision and reviewed references. Run it explicitly:
 
-    pytest -sv tests/e2e/offline_inference/test_sensenova_u1_img2img_expansion.py \
-        -m advanced_model --run-level advanced_model
+    pytest -sv tests/e2e/offline_inference/test_sensenova_u1_img2img_expansion.py::test_sensenova_u1_img2img_pixel_accuracy \
+        -m "slow and diffusion and cuda and H100 and cards_1" --run-level full_model
 
 Equivalent to running:
     python examples/offline_inference/image_to_image/image_edit.py \
@@ -139,11 +139,11 @@ def test_sensenova_u1_img2img():
         _generate_sensenova_u1_img2img(runner.omni, input_image)
 
 
-@pytest.mark.advanced_model
+@pytest.mark.slow
 @pytest.mark.diffusion
 @hardware_test(res={"cuda": "H100"})
 def test_sensenova_u1_img2img_pixel_accuracy():
-    """Compare pinned H100 output with reviewed goldens outside weekly smoke."""
+    """Compare pinned H100 output with reviewed goldens in the weekly job."""
     input_image = _load_input_image()
     with OmniRunner(accuracy.accuracy_model_path()) as runner:
         generated_image = _generate_sensenova_u1_img2img(runner.omni, input_image)

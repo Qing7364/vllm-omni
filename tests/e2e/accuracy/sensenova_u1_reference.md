@@ -1,9 +1,12 @@
 # SenseNova-U1 pixel references
 
-The weekly SenseNova smoke step checks generation and output dimensions.
-The separate `advanced_model` accuracy job compares ten RGB samples per image
-with a per-channel tolerance of ±10. The weekly build also includes this L3
-accuracy job; the smoke step itself does not perform pixel comparisons.
+The weekly SenseNova H100 job runs smoke coverage and pixel accuracy checks.
+All model tests use the `slow` mark and run from `test-weekly.yml`, outside the
+merge pipeline. The smoke invocation checks generation and output dimensions
+and excludes `pixel_accuracy` tests. Each accuracy case then runs once in its
+own pytest process on the same worker and compares ten RGB samples per image
+with a per-channel tolerance of ±10. The job preserves PNG, JSON and JUnit
+artifacts and fails if the smoke invocation or either accuracy case fails.
 
 The accuracy tests resolve `SenseNova/SenseNova-U1-8B-MoT` at the immutable
 revision `bfa9b436503cb8aed4f2bc60e3236710cc77468d` before loading the model.
@@ -14,10 +17,11 @@ the gate must be able to test new code against an existing reference.
 
 `SENSENOVA_U1_CI_IMAGE` records provenance; it does not select or pin the running
 container. The H100 hardware preset selects the CI image for `BUILDKITE_COMMIT`.
-A successful capture and replay in a recorded image must still be validated by
-the actual PR accuracy job before merge. Attach the capture PNG images and JSON,
-independent replay logs, exit codes, JUnit results and source/image provenance to
-the PR so reviewers can verify the evidence rather than infer it from metadata.
+A successful capture and replay in a recorded image does not establish a pass
+for a newer checkout or CI image; the weekly accuracy job validates that
+environment. Attach the capture PNG images and JSON, independent replay logs,
+exit codes, JUnit results and source/image provenance to the PR so reviewers can
+verify the evidence rather than infer it from metadata.
 
 ## Capture a candidate
 
@@ -37,8 +41,8 @@ for mode in text2img img2img; do
   capture_status=0
   pytest -sv \
     "tests/e2e/offline_inference/test_sensenova_u1_${mode}_expansion.py::test_sensenova_u1_${mode}_pixel_accuracy" \
-    -m 'advanced_model and diffusion and cuda and H100 and cards_1' \
-    --run-level advanced_model \
+    -m 'slow and diffusion and cuda and H100 and cards_1' \
+    --run-level full_model \
     --junitxml="$SENSENOVA_U1_ARTIFACT_DIR/$mode.xml" || capture_status=$?
   printf '%s capture comparison exit: %s\n' "$mode" "$capture_status"
 done
@@ -100,8 +104,8 @@ for round in 1 2; do
   for mode in text2img img2img; do
     pytest -sv \
       "tests/e2e/offline_inference/test_sensenova_u1_${mode}_expansion.py::test_sensenova_u1_${mode}_pixel_accuracy" \
-      -m 'advanced_model and diffusion and cuda and H100 and cards_1' \
-      --run-level advanced_model \
+      -m 'slow and diffusion and cuda and H100 and cards_1' \
+      --run-level full_model \
       --junitxml="$SENSENOVA_U1_ARTIFACT_DIR/$mode.xml" || verification_status=1
   done
 done

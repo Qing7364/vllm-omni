@@ -57,15 +57,17 @@ omni = Omni(
 
 ### Qwen-Image 2.1 (experimental)
 
-The 2.1 single-stream model requires its own calibrated coefficients. Passing
-only `cache_backend="tea_cache"` raises an error; older Qwen-Image coefficients
-do not establish compatibility. This path remains experimental. A bounded
+The 2.1 single-stream model requires its own calibrated coefficients and an
+explicit finite positive `rel_l1_thresh`; neither has a model-specific default.
+Passing only `cache_backend="tea_cache"` raises an error; older Qwen-Image
+coefficients do not establish compatibility. This path remains experimental. A bounded
 single-GPU BF16 eager experiment passed force-full parity and held-out numerical
 quality checks; human visual acceptance remains pending.
 
 The initial scope is single-GPU, batch-1 request mode, unquantized weights and
-no static LoRA. Step mode and parallel execution are rejected. Keep dynamic
-LoRA, FP8 prefix storage and offload disabled during qualification. Whole-decode
+no LoRA. Step mode, parallel execution, FP8 prefix storage and offload are
+rejected by both the TeaCache and calibration enablers. Dynamic LoRA wrappers
+loaded after initialization are rejected before prefill writes prefix KV. Whole-decode
 CUDA graphs are disabled automatically; evaluate compilation separately.
 
 After fitting and validating `coefficients` for the exact checkpoint and workload:

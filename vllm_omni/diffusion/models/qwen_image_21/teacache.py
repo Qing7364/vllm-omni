@@ -61,6 +61,9 @@ class QwenImage21DenoisingAdapter(nn.Module):
         if block_kwargs["cache_branch"] not in {"cond", "uncond"}:
             raise ValueError("Qwen-Image 2.1 TeaCache requires a cond or uncond cache branch")
         if not is_decode:
+            # Request-time LoRA can be loaded after startup. Reject it before
+            # any prefix KV write, without scanning modules on every decode.
+            _validate_no_dynamic_lora(self.transformer)
             # Both CFG prefills precede decode in request mode. Neither may
             # seed or reuse a target-only residual, even at identical shapes.
             self.reset_cache()
@@ -88,10 +91,8 @@ def enable_qwen_image21_teacache(pipeline: _Pipeline, config: DiffusionCacheConf
             "Qwen-Image 2.1 TeaCache requires five explicit finite numeric coefficients; calibrate this model"
         )
     threshold = config.rel_l1_thresh
-    if threshold is None:
-        threshold = 0.2
     if isinstance(threshold, bool) or not isinstance(threshold, Real) or not math.isfinite(threshold) or threshold <= 0:
-        raise ValueError("rel_l1_thresh must be a finite positive number")
+        raise ValueError("rel_l1_thresh must be an explicit finite positive number")
     _validate_pipeline(pipeline)
 
     tea_config = TeaCacheConfig(
@@ -105,6 +106,8 @@ def enable_qwen_image21_teacache(pipeline: _Pipeline, config: DiffusionCacheConf
 
 
 def _validate_pipeline(pipeline: _Pipeline) -> None:
+    from vllm_omni.diffusion.offloader.config import offload_enabled
+
     if pipeline.od_config.step_execution:
         raise ValueError("Qwen-Image 2.1 TeaCache currently requires request mode")
     parallel = pipeline.transformer.parallel_config
@@ -127,6 +130,18 @@ def _validate_pipeline(pipeline: _Pipeline) -> None:
         raise ValueError("Qwen-Image 2.1 TeaCache requires causal_condition=True")
     if pipeline.od_config.quantization_config is not None or pipeline.od_config.lora_path is not None:
         raise ValueError("Qwen-Image 2.1 TeaCache calibration currently requires unquantized weights without LoRA")
+    if offload_enabled(pipeline.od_config):
+        raise ValueError("Qwen-Image 2.1 TeaCache and calibration currently require offload disabled")
+    if pipeline.transformer.prefix_kv_cache_dtype is not None:
+        raise ValueError("Qwen-Image 2.1 TeaCache and calibration currently require native-precision prefix KV storage")
+    _validate_no_dynamic_lora(pipeline.transformer)
+
+
+def _validate_no_dynamic_lora(transformer: QwenImage21Transformer2DModel) -> None:
+    from vllm_omni.diffusion.models.qwen_image_21.decode_graph import _dynamic_lora_wrappers_present
+
+    if _dynamic_lora_wrappers_present(transformer):
+        raise ValueError("Qwen-Image 2.1 TeaCache and calibration currently require dynamic LoRA disabled")
 
 
 def _attach_adapter(pipeline: _Pipeline, adapter: QwenImage21DenoisingAdapter) -> None:

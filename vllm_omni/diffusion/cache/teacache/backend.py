@@ -293,24 +293,14 @@ class TeaCacheBackend(CacheBackend):
                 logger.debug(f"TeaCache state refreshed for HunyuanImage3 (num_inference_steps={num_inference_steps})")
             return
 
-        # Extract transformer from pipeline
-        transformer = pipeline.transformer
-        if pipeline.__class__.__name__ == "QwenImage21Pipeline":
-            # The real transformer can have unrelated hooks; TeaCache belongs
-            # to the decode-only adapter regardless of that registry's presence.
-            transformer = pipeline.denoising_transformer
-        elif not hasattr(transformer, "_hook_registry") and hasattr(pipeline, "denoising_transformer"):
-            transformer = pipeline.denoising_transformer
-
-        if hasattr(transformer, "_hook_registry"):
-            hook = transformer._hook_registry.get_hook(TeaCacheHook._HOOK_NAME)
-            if hook is not None:
-                transformer._hook_registry.reset_hook(TeaCacheHook._HOOK_NAME)
+        # Prefer a denoising boundary that actually owns TeaCache. The weight
+        # owner can have a registry containing unrelated hooks.
+        for transformer in (getattr(pipeline, "denoising_transformer", None), pipeline.transformer):
+            registry = getattr(transformer, "_hook_registry", None)
+            if registry is not None and registry.get_hook(TeaCacheHook._HOOK_NAME) is not None:
+                registry.reset_hook(TeaCacheHook._HOOK_NAME)
                 if verbose:
                     logger.debug(f"TeaCache state refreshed (num_inference_steps={num_inference_steps})")
-            else:
-                if verbose:
-                    logger.warning("TeaCache hook not found, nothing to refresh")
-        else:
-            if verbose:
-                logger.warning("Transformer has no hook registry, TeaCache may not be applied")
+                return
+        if verbose:
+            logger.warning("TeaCache hook not found, nothing to refresh")

@@ -4,7 +4,6 @@
 """Small tensor tests of the decode-only boundary, using the real TeaCache hook."""
 
 from dataclasses import dataclass
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -21,6 +20,25 @@ from vllm_omni.diffusion.models.qwen_image_21.teacache import (
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu, pytest.mark.diffusion]
 
 KVCache = list[dict[str, dict[str, torch.Tensor]]]
+
+
+@dataclass
+class _ParallelConfig:
+    tensor_parallel_size: int = 1
+    sequence_parallel_size: int = 1
+    cfg_parallel_size: int = 1
+    pipeline_parallel_size: int = 1
+    data_parallel_size: int = 1
+    world_size: int = 1
+    use_hsdp: bool = False
+    hsdp_shard_size: int = 1
+    hsdp_replicate_size: int = 1
+
+
+@dataclass
+class _CacheConfig:
+    rel_l1_thresh: object
+    coefficients: object
 
 
 class _Block(nn.Module):
@@ -47,13 +65,8 @@ class _Transformer(nn.Module):
         super().__init__()
         self.transformer_blocks = nn.ModuleList([_Block(2), _Block(3)])
         self.causal_condition = True
-        self.parallel_config = SimpleNamespace(
-            tensor_parallel_size=1,
-            sequence_parallel_size=1,
-            cfg_parallel_size=1,
-            pipeline_parallel_size=1,
-            data_parallel_size=1,
-        )
+        self.parallel_config = _ParallelConfig()
+        self.prefix_kv_cache_dtype = None
         self._decode_graph_manager = None
         self.enable_cuda_graph_decode = True
 
@@ -70,6 +83,10 @@ class _Config:
     step_execution: bool = False
     quantization_config: object = None
     lora_path: str | None = None
+    enable_cpu_offload: bool = False
+    enable_layerwise_offload: bool = False
+    enable_distributed_layerwise_offload: bool = False
+    diffusion_offload_config: dict[str, object] | None = None
 
 
 class QwenImage21Pipeline(nn.Module):
@@ -80,7 +97,7 @@ class QwenImage21Pipeline(nn.Module):
 
 
 def _config(coefficients=None, threshold=0.2):
-    return SimpleNamespace(rel_l1_thresh=threshold, coefficients=coefficients or [0, 0, 0, 0, 0.1])
+    return _CacheConfig(rel_l1_thresh=threshold, coefficients=coefficients or [0, 0, 0, 0, 0.1])
 
 
 def _kwargs(cache, branch="cond", prefill=False):
@@ -140,6 +157,57 @@ def test_branch_identity_does_not_depend_on_call_parity():
     assert [block.calls for block in pipe.transformer.transformer_blocks] == [4, 4]
 
 
+@pytest.mark.parametrize("do_true_cfg", [False, True])
+@torch.inference_mode()
+def test_real_hook_keeps_distinct_cfg_states_and_residuals(do_true_cfg):
+    pipe = QwenImage21Pipeline()
+    # The pipeline writes this flag on the transformer, not the hook adapter.
+    pipe.transformer.do_true_cfg = do_true_cfg
+    enable_qwen_image21_teacache(pipe, _config(threshold=100))
+    adapter = pipe.denoising_transformer
+    assert not hasattr(adapter, "do_true_cfg")
+    cache: KVCache = [{}, {}]
+    for branch in ("cond", "uncond"):
+        _invoke(adapter, cache, branch, prefill=True)
+    for branch in ("cond", "uncond", "uncond", "cond"):
+        expected = _input() + (5 if branch == "cond" else -5)
+        torch.testing.assert_close(_invoke(adapter, cache, branch), expected, rtol=0, atol=0)
+
+    hook = HookRegistry.get_or_create(adapter).get_hook("teacache")
+    states = hook.state_manager._states
+    assert set(states) == {"teacache_positive", "teacache_negative"}
+    positive, negative = states["teacache_positive"], states["teacache_negative"]
+    assert positive is not negative
+    assert positive.previous_residual.data_ptr() != negative.previous_residual.data_ptr()
+    torch.testing.assert_close(positive.previous_residual, torch.full_like(_input(), 5), rtol=0, atol=0)
+    torch.testing.assert_close(negative.previous_residual, torch.full_like(_input(), -5), rtol=0, atol=0)
+    assert positive.cnt == negative.cnt == 2
+    # Two prefills and the first decode of each branch compute; both later calls hit.
+    assert [block.calls for block in pipe.transformer.transformer_blocks] == [4, 4]
+
+
+@pytest.mark.parametrize("cache_on_denoising_boundary", [False, True])
+@torch.inference_mode()
+def test_refresh_finds_the_adapter_hook_without_a_pipeline_class_name(cache_on_denoising_boundary):
+    class WrappedPipeline(QwenImage21Pipeline):
+        pass
+
+    pipe = WrappedPipeline()
+    HookRegistry.get_or_create(pipe.transformer)
+    enable_qwen_image21_teacache(pipe, _config(threshold=100))
+    weight_owner, adapter = pipe.transformer, pipe.denoising_transformer
+    if not cache_on_denoising_boundary:
+        # Also preserve the generic transformer-owned cache path when the
+        # denoising object has only an unrelated registry.
+        pipe.transformer, pipe.denoising_transformer = adapter, weight_owner
+    cache: KVCache = [{}, {}]
+    _invoke(adapter, cache, prefill=True)
+    _invoke(adapter, cache)
+    weight_owner.transformer_blocks[0].value = 7
+    TeaCacheBackend(_config(threshold=100)).refresh(pipe, num_inference_steps=50, verbose=False)
+    torch.testing.assert_close(_invoke(adapter, cache), _input() + 10)
+
+
 @pytest.mark.parametrize("with_transformer_hooks", [False, True])
 @torch.inference_mode()
 def test_refresh_and_new_same_shape_prefill_clear_residuals(with_transformer_hooks):
@@ -177,15 +245,87 @@ def test_feature_matches_first_blocks_normalization_and_prepared_scale():
 def test_invalid_coefficients_rejected_before_mutating_pipeline(coefficients):
     pipe = QwenImage21Pipeline()
     with pytest.raises((ValueError, TypeError), match="coefficients"):
-        enable_qwen_image21_teacache(pipe, SimpleNamespace(coefficients=coefficients, rel_l1_thresh=0.2))
+        enable_qwen_image21_teacache(pipe, _CacheConfig(coefficients=coefficients, rel_l1_thresh=0.2))
     assert pipe.transformer.enable_cuda_graph_decode
     assert not hasattr(pipe, "denoising_transformer")
 
 
-@pytest.mark.parametrize("threshold", [0, -1, float("nan"), float("inf"), "0.2", True])
+@pytest.mark.parametrize("threshold", [None, 0, -1, float("nan"), float("inf"), "0.2", True])
 def test_invalid_threshold_rejected(threshold):
     with pytest.raises((ValueError, TypeError), match="rel_l1_thresh"):
         enable_qwen_image21_teacache(QwenImage21Pipeline(), _config(threshold=threshold))
+
+
+@pytest.mark.parametrize("calibration", [False, True])
+@pytest.mark.parametrize(
+    "offload",
+    [
+        {"enable_cpu_offload": True},
+        {"enable_layerwise_offload": True},
+        {"enable_distributed_layerwise_offload": True},
+        {"diffusion_offload_config": {"mode": "layer", "components": ["dit"]}},
+        {"diffusion_offload_config": {"mode": "module", "components": ["text_encoder"]}},
+    ],
+)
+def test_unqualified_offload_is_rejected_before_installation(offload, calibration):
+    from vllm_omni.diffusion.models.qwen_image_21.teacache import enable_qwen_image21_calibration
+
+    pipe = QwenImage21Pipeline()
+    pipe.od_config = _Config(**offload)
+    with pytest.raises(ValueError, match="offload"):
+        if calibration:
+            enable_qwen_image21_calibration(pipe)
+        else:
+            enable_qwen_image21_teacache(pipe, _config())
+    assert not hasattr(pipe, "denoising_transformer")
+    assert pipe.transformer.enable_cuda_graph_decode
+
+
+@pytest.mark.parametrize("calibration", [False, True])
+@pytest.mark.parametrize("prefix_dtype", ["fp8_e4m3", "fp8_e4m3_v"])
+def test_unqualified_fp8_prefix_storage_is_rejected(prefix_dtype, calibration):
+    from vllm_omni.diffusion.models.qwen_image_21.teacache import enable_qwen_image21_calibration
+
+    pipe = QwenImage21Pipeline()
+    pipe.transformer.prefix_kv_cache_dtype = prefix_dtype
+    with pytest.raises(ValueError, match="prefix"):
+        if calibration:
+            enable_qwen_image21_calibration(pipe)
+        else:
+            enable_qwen_image21_teacache(pipe, _config())
+    assert not hasattr(pipe, "denoising_transformer")
+
+
+@pytest.mark.parametrize("calibration", [False, True])
+@pytest.mark.parametrize("already_wrapped", [False, True])
+@torch.inference_mode()
+def test_dynamic_lora_is_rejected_at_installation_or_before_prefill(monkeypatch, calibration, already_wrapped):
+    from vllm_omni.diffusion.models.qwen_image_21 import decode_graph
+    from vllm_omni.diffusion.models.qwen_image_21.teacache import enable_qwen_image21_calibration
+
+    pipe = QwenImage21Pipeline()
+    # Reuse the existing runtime LoRA-wrapper detector. This unit test isolates
+    # the rejection boundary; it does not load an adapter or qualify LoRA math.
+    monkeypatch.setattr(decode_graph, "_dynamic_lora_wrappers_present", lambda model: already_wrapped)
+
+    def install():
+        if calibration:
+            enable_qwen_image21_calibration(pipe)
+        else:
+            enable_qwen_image21_teacache(pipe, _config())
+
+    if already_wrapped:
+        with pytest.raises(ValueError, match="LoRA"):
+            install()
+        assert not hasattr(pipe, "denoising_transformer")
+    else:
+        install()
+        monkeypatch.setattr(decode_graph, "_dynamic_lora_wrappers_present", lambda model: True)
+        cache: KVCache = [{}, {}]
+        with pytest.raises(ValueError, match="LoRA"):
+            _invoke(pipe.denoising_transformer, cache, prefill=True)
+        assert cache == [{}, {}]
+        assert [block.calls for block in pipe.transformer.transformer_blocks] == [0, 0]
 
 
 @pytest.mark.parametrize("field", ["tensor_parallel_size", "sequence_parallel_size", "cfg_parallel_size"])
@@ -259,6 +399,7 @@ def test_real_transformer_forward_keeps_output_layers_outside_cached_blocks():
     model.parallel_config = None
     model.causal_condition = True
     model.causal_block = True
+    model.prefix_kv_cache_dtype = None
     model.transformer_blocks = nn.ModuleList([_Block(2), _Block(3)])
     model._decode_graph_manager = None
     model.enable_cuda_graph_decode = False

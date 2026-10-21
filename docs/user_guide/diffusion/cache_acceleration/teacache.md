@@ -70,6 +70,20 @@ rejected by both the TeaCache and calibration enablers. Dynamic LoRA wrappers
 loaded after initialization are rejected before prefill writes prefix KV. Whole-decode
 CUDA graphs are disabled automatically; evaluate compilation separately.
 
+Two optional keys refine the skip decision:
+
+These policy options have CPU regression coverage; real-checkpoint quality and
+performance confirmation of the in-tree implementation is pending. The measured
+results below describe the earlier policy without either optional key.
+
+- `cfg_rel_l1_thresh` replaces `rel_l1_thresh` for requests with true CFG.
+  Both CFG branches see the same decision feature, so they skip on the same
+  steps and the guidance scale amplifies the reused residuals' error.
+- `skip_timestep_range` is an exclusive `[low, high]` range of the
+  transformer timestep in `[0, 1]`. Decode steps outside it always compute and
+  restart the accumulated distance. Output changes are largest in the earliest
+  and latest steps, where a single reused residual can fail the quality gate.
+
 After fitting and validating `coefficients` for the exact checkpoint and workload:
 
 ```python
@@ -79,9 +93,19 @@ omni = Omni(
     dtype="bfloat16",
     enforce_eager=True,
     cache_backend="tea_cache",
-    cache_config={"rel_l1_thresh": 0.05, "coefficients": coefficients},
+    cache_config={
+        "rel_l1_thresh": 0.10,
+        "cfg_rel_l1_thresh": 0.05,
+        "skip_timestep_range": [0.30, 0.855],
+        "coefficients": coefficients,
+    },
 )
 ```
+
+The timestep range is tied to the measured schedule: 50 explicit linear sigmas
+at 1024x1024, where the scheduler's dynamic shift maps denoising steps 13–40
+(0-based; the prefill is step 0) into `(0.30, 0.855)`. Other resolutions, step counts or sigma schedules shift those
+timesteps; recompute the range and revalidate quality for them.
 
 #### Measured configuration and limits
 

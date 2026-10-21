@@ -19,6 +19,12 @@ TeaCache boundary differs from the older dual-stream Qwen-Image extractor:
   pipeline class name. No parameters are registered on the adapter.
 - Whole-decode CUDA graphs are disabled because their replay bypasses Python
   skip decisions. Other cache backends remain disabled for this model.
+- A frozen `QwenImage21SkipPolicy` on the adapter chooses the threshold per
+  request (`cfg_rel_l1_thresh` when the pipeline sets `do_true_cfg`) and allows
+  skips only inside `skip_timestep_range`. The extractor passes the threshold
+  through the hook's per-call `rel_l1_thresh` override and forces steps outside
+  the range through `synchronize_cache_decision`, which also resets the
+  accumulated distance. Without these keys the decision is the plain TeaCache rule.
 
 This is an opt-in experiment for single-GPU, batch-1 request-mode inference,
 without quantized weights, LoRA, offload or FP8 prefix storage. Both enablers

@@ -31,12 +31,34 @@ class _Pipeline(Protocol):
     od_config: OmniDiffusionConfig
 
 
+@dataclass(frozen=True)
+class QwenImage21SkipPolicy:
+    """Per-step skip rules applied on top of the calibrated TeaCache decision."""
+
+    rel_l1_thresh: float
+    cfg_rel_l1_thresh: float
+    # Exclusive (low, high) bounds on the transformer timestep in [0, 1]. Steps
+    # outside it always compute: early and late output changes are largest.
+    skip_timestep_range: tuple[float, float] | None = None
+
+    def threshold(self, do_true_cfg: bool) -> float:
+        return self.cfg_rel_l1_thresh if do_true_cfg else self.rel_l1_thresh
+
+    def allows_skip(self, timestep: torch.Tensor) -> bool:
+        if self.skip_timestep_range is None:
+            return True
+        low, high = self.skip_timestep_range
+        # Reading the scalar synchronizes with the device; only do it when a window is set.
+        return low < float(timestep) < high
+
+
 class QwenImage21DenoisingAdapter(nn.Module):
     """Hook target for the block stack, without registering the weights again."""
 
-    def __init__(self, transformer: QwenImage21Transformer2DModel):
+    def __init__(self, transformer: QwenImage21Transformer2DModel, policy: QwenImage21SkipPolicy | None = None):
         super().__init__()
         self._transformer_ref = weakref.ref(transformer)
+        self.policy = policy
 
     @property
     def transformer(self) -> QwenImage21Transformer2DModel:
@@ -52,7 +74,13 @@ class QwenImage21DenoisingAdapter(nn.Module):
             registry.reset_hook("teacache_collector")
 
     def run(
-        self, hidden_states: torch.Tensor, modulation: torch.Tensor, *, is_decode: bool, **block_kwargs: Any
+        self,
+        hidden_states: torch.Tensor,
+        modulation: torch.Tensor,
+        *,
+        is_decode: bool,
+        timestep: torch.Tensor,
+        **block_kwargs: Any,
     ) -> torch.Tensor:
         if torch.is_grad_enabled():
             raise ValueError("Qwen-Image 2.1 TeaCache requires inference mode")
@@ -68,9 +96,28 @@ class QwenImage21DenoisingAdapter(nn.Module):
             # seed or reuse a target-only residual, even at identical shapes.
             self.reset_cache()
             return self.transformer._run_transformer_blocks(hidden_states, modulation, **block_kwargs)
-        return self(hidden_states, modulation, **block_kwargs)
+        if self.policy is None:
+            return self(hidden_states, modulation, **block_kwargs)
+        return self(
+            hidden_states,
+            modulation,
+            skip_allowed=self.policy.allows_skip(timestep),
+            # The pipeline sets this flag on the transformer for each request.
+            rel_l1_thresh=self.policy.threshold(getattr(self.transformer, "do_true_cfg", False)),
+            **block_kwargs,
+        )
 
-    def forward(self, hidden_states: torch.Tensor, modulation: torch.Tensor, **block_kwargs: Any) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        modulation: torch.Tensor,
+        *,
+        skip_allowed: bool = True,
+        rel_l1_thresh: float | None = None,
+        **block_kwargs: Any,
+    ) -> torch.Tensor:
+        # Policy arguments only steer the TeaCache hook; dense execution ignores them.
+        del skip_allowed, rel_l1_thresh
         return self.transformer._run_transformer_blocks(hidden_states, modulation, **block_kwargs)
 
 
@@ -90,19 +137,44 @@ def enable_qwen_image21_teacache(pipeline: _Pipeline, config: DiffusionCacheConf
         raise ValueError(
             "Qwen-Image 2.1 TeaCache requires five explicit finite numeric coefficients; calibrate this model"
         )
-    threshold = config.rel_l1_thresh
-    if isinstance(threshold, bool) or not isinstance(threshold, Real) or not math.isfinite(threshold) or threshold <= 0:
-        raise ValueError("rel_l1_thresh must be an explicit finite positive number")
+    threshold = _positive_threshold(config.rel_l1_thresh, "rel_l1_thresh")
+    cfg_threshold = getattr(config, "cfg_rel_l1_thresh", None)
+    if cfg_threshold is not None:
+        cfg_threshold = _positive_threshold(cfg_threshold, "cfg_rel_l1_thresh")
+    policy = QwenImage21SkipPolicy(
+        rel_l1_thresh=threshold,
+        cfg_rel_l1_thresh=threshold if cfg_threshold is None else cfg_threshold,
+        skip_timestep_range=_skip_timestep_range(getattr(config, "skip_timestep_range", None)),
+    )
     _validate_pipeline(pipeline)
 
     tea_config = TeaCacheConfig(
         transformer_type="QwenImage21DenoisingAdapter",
-        rel_l1_thresh=float(threshold),
+        rel_l1_thresh=threshold,
         coefficients=[float(value) for value in coefficients],
     )
-    adapter = QwenImage21DenoisingAdapter(pipeline.transformer)
+    adapter = QwenImage21DenoisingAdapter(pipeline.transformer, policy)
     apply_teacache_hook(adapter, tea_config)
     _attach_adapter(pipeline, adapter)
+
+
+def _positive_threshold(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be an explicit finite positive number")
+    return float(value)
+
+
+def _skip_timestep_range(value: object) -> tuple[float, float] | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, (list, tuple))
+        or len(value) != 2
+        or any(isinstance(item, bool) or not isinstance(item, Real) or not math.isfinite(item) for item in value)
+        or not 0 <= value[0] < value[1] <= 1
+    ):
+        raise ValueError("skip_timestep_range must be [low, high] with 0 <= low < high <= 1")
+    return float(value[0]), float(value[1])
 
 
 def _validate_pipeline(pipeline: _Pipeline) -> None:

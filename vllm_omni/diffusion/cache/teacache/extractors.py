@@ -1806,7 +1806,13 @@ def extract_cosmos3_context(
 # Note: Use the transformer class name as specified in pipelines as TeaCache hooks operate
 # on the transformer module and multiple pipelines can share the same transformer.
 def extract_qwen_image21_context(
-    module: "QwenImage21DenoisingAdapter", hidden_states: torch.Tensor, modulation: torch.Tensor, **block_kwargs: Any
+    module: "QwenImage21DenoisingAdapter",
+    hidden_states: torch.Tensor,
+    modulation: torch.Tensor,
+    *,
+    skip_allowed: bool = True,
+    rel_l1_thresh: float | None = None,
+    **block_kwargs: Any,
 ) -> CacheContext:
     """Target-only decode; the original model retains preparation and output layers."""
     prepared = block_kwargs.get("prepared_modulation")
@@ -1822,6 +1828,14 @@ def extract_qwen_image21_context(
     def run_blocks():
         return (module.transformer._run_transformer_blocks(hidden_states, modulation, **block_kwargs),)
 
+    extra_states: dict[str, Any] = {
+        "teacache_branch": "positive" if block_kwargs["cache_branch"] == "cond" else "negative"
+    }
+    if rel_l1_thresh is not None:
+        extra_states["rel_l1_thresh"] = rel_l1_thresh
+    if not skip_allowed:
+        # Forcing the decision also resets the accumulated distance in the hook.
+        extra_states["synchronize_cache_decision"] = lambda local_should_compute: True
     return CacheContext(
         modulated_input=modulated_input,
         hidden_states=hidden_states,
@@ -1829,7 +1843,7 @@ def extract_qwen_image21_context(
         temb=modulation,
         run_transformer_blocks=run_blocks,
         postprocess=lambda output: output,
-        extra_states={"teacache_branch": "positive" if block_kwargs["cache_branch"] == "cond" else "negative"},
+        extra_states=extra_states,
     )
 
 

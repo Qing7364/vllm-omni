@@ -1417,7 +1417,10 @@ class QwenImage21Transformer2DModel(CachedTransformer):
         if adapter is None:
             joint_hidden_states = self._run_transformer_blocks(joint_hidden_states, modulation, **block_kwargs)
         else:
-            joint_hidden_states = adapter.run(joint_hidden_states, modulation, is_decode=is_decode, **block_kwargs)
+            # The adapter requires batch size 1, so row 0 is the sampled timestep.
+            joint_hidden_states = adapter.run(
+                joint_hidden_states, modulation, is_decode=is_decode, timestep=timestep[0], **block_kwargs
+            )
 
         if (
             not is_decode

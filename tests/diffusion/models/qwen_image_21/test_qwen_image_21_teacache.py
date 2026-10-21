@@ -39,6 +39,8 @@ class _ParallelConfig:
 class _CacheConfig:
     rel_l1_thresh: object
     coefficients: object
+    cfg_rel_l1_thresh: object = None
+    skip_timestep_range: object = None
 
 
 class _Block(nn.Module):
@@ -119,8 +121,14 @@ def _input():
     return torch.tensor([[[1.0, 2.0], [3.0, 4.0]]])
 
 
-def _invoke(adapter, cache, branch="cond", prefill=False):
-    return adapter.run(_input(), torch.zeros(2, 8), is_decode=not prefill, **_kwargs(cache, branch, prefill))
+def _invoke(adapter, cache, branch="cond", prefill=False, timestep=0.5):
+    return adapter.run(
+        _input(),
+        torch.zeros(2, 8),
+        is_decode=not prefill,
+        timestep=torch.tensor(timestep),
+        **_kwargs(cache, branch, prefill),
+    )
 
 
 @torch.inference_mode()
@@ -256,6 +264,71 @@ def test_invalid_threshold_rejected(threshold):
         enable_qwen_image21_teacache(QwenImage21Pipeline(), _config(threshold=threshold))
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("cfg_rel_l1_thresh", 0),
+        ("cfg_rel_l1_thresh", float("nan")),
+        ("cfg_rel_l1_thresh", "0.1"),
+        ("cfg_rel_l1_thresh", True),
+        ("skip_timestep_range", (0.3,)),
+        ("skip_timestep_range", (0.8, 0.3)),
+        ("skip_timestep_range", (-0.1, 0.5)),
+        ("skip_timestep_range", (0.3, 1.5)),
+        ("skip_timestep_range", (0.3, float("nan"))),
+        ("skip_timestep_range", (True, 0.5)),
+        ("skip_timestep_range", "0.3,0.8"),
+    ],
+)
+def test_invalid_skip_policy_rejected_before_mutating_pipeline(field, value):
+    pipe = QwenImage21Pipeline()
+    config = _config()
+    setattr(config, field, value)
+    with pytest.raises(ValueError, match=field):
+        enable_qwen_image21_teacache(pipe, config)
+    assert pipe.transformer.enable_cuda_graph_decode
+    assert not hasattr(pipe, "denoising_transformer")
+
+
+@torch.inference_mode()
+def test_steps_outside_timestep_window_compute_and_reset_accumulation():
+    pipe = QwenImage21Pipeline()
+    # Each decode adds a rescaled distance of 0.1; 0.25 allows two consecutive hits.
+    config = _config(threshold=0.25)
+    config.skip_timestep_range = (0.3, 0.8)
+    enable_qwen_image21_teacache(pipe, config)
+    adapter = pipe.denoising_transformer
+    cache: KVCache = [{}, {}]
+    _invoke(adapter, cache, prefill=True, timestep=1.0)
+    blocks = pipe.transformer.transformer_blocks
+    computed = []
+    for timestep in (0.9, 0.7, 0.85, 0.6, 0.5, 0.4, 0.2):
+        before = blocks[0].calls
+        _invoke(adapter, cache, timestep=timestep)
+        computed.append(blocks[0].calls > before)
+    # 0.9: first decode. 0.85 and 0.2: outside the window. The forced step at
+    # 0.85 resets the 0.2 accumulated so far, so 0.6 and 0.5 hit before 0.4 computes.
+    assert computed == [True, False, True, False, False, True, True]
+
+
+@pytest.mark.parametrize(("do_true_cfg", "block_calls"), [(False, 3), (True, 2)])
+@torch.inference_mode()
+def test_true_cfg_requests_use_their_own_threshold(do_true_cfg, block_calls):
+    pipe = QwenImage21Pipeline()
+    pipe.transformer.do_true_cfg = do_true_cfg
+    config = _config(threshold=0.15)
+    config.cfg_rel_l1_thresh = 100
+    enable_qwen_image21_teacache(pipe, config)
+    adapter = pipe.denoising_transformer
+    cache: KVCache = [{}, {}]
+    _invoke(adapter, cache, prefill=True, timestep=1.0)
+    for _ in range(3):
+        _invoke(adapter, cache)
+    # Prefill and first decode always compute. Without true CFG the accumulated
+    # 0.2 crosses 0.15 on the third decode; with it, both later decodes hit.
+    assert [block.calls for block in pipe.transformer.transformer_blocks] == [block_calls] * 2
+
+
 @pytest.mark.parametrize("calibration", [False, True])
 @pytest.mark.parametrize(
     "offload",
@@ -370,7 +443,11 @@ def test_batching_is_rejected_before_prefix_write():
     cache: KVCache = [{}, {}]
     with pytest.raises(ValueError, match="batch size 1"):
         pipe.denoising_transformer.run(
-            _input().repeat(2, 1, 1), torch.zeros(3, 8), is_decode=False, **_kwargs(cache, prefill=True)
+            _input().repeat(2, 1, 1),
+            torch.zeros(3, 8),
+            is_decode=False,
+            timestep=torch.tensor(1.0),
+            **_kwargs(cache, prefill=True),
         )
     assert cache == [{}, {}]
 
@@ -386,8 +463,9 @@ class _OutputNorm(nn.Module):
         return hidden_states + temb[0, 0]
 
 
+@pytest.mark.parametrize(("skip_timestep_range", "block_calls"), [(None, 4), ((0.3, 0.4), 5)])
 @torch.inference_mode()
-def test_real_transformer_forward_keeps_output_layers_outside_cached_blocks():
+def test_real_transformer_forward_keeps_output_layers_outside_cached_blocks(skip_timestep_range, block_calls):
     from vllm_omni.diffusion.models.qwen_image_21.qwen_image_21_transformer import (
         QwenImage21Rope,
         QwenImage21SequencePrepare,
@@ -424,15 +502,18 @@ def test_real_transformer_forward_keeps_output_layers_outside_cached_blocks():
     model(**inputs, timestep=torch.tensor([1.0]), kv_cache=reference_cache)
     expected = model(**inputs, timestep=torch.tensor([0.5]), kv_cache=reference_cache)[0]
     keys = set(model.state_dict())
-    enable_qwen_image21_teacache(pipe, _config(threshold=100))
+    config = _config(threshold=100)
+    config.skip_timestep_range = skip_timestep_range
+    enable_qwen_image21_teacache(pipe, config)
     cache: KVCache = [{}, {}]
     model(**inputs, timestep=torch.tensor([1.0]), kv_cache=cache)
     first = model(**inputs, timestep=torch.tensor([0.5]), kv_cache=cache)[0]
-    hit = model(**inputs, timestep=torch.tensor([0.25]), kv_cache=cache)[0]
+    # A hit without a window; with one, t=0.25 is outside it and recomputes.
+    last = model(**inputs, timestep=torch.tensor([0.25]), kv_cache=cache)[0]
     torch.testing.assert_close(first, expected, rtol=0, atol=0)
-    torch.testing.assert_close(hit, expected - 0.25, rtol=0, atol=0)
+    torch.testing.assert_close(last, expected - 0.25, rtol=0, atol=0)
     assert set(model.state_dict()) == keys
-    assert [block.calls for block in model.transformer_blocks] == [4, 4]
+    assert [block.calls for block in model.transformer_blocks] == [block_calls] * 2
 
 
 @torch.inference_mode()
@@ -445,12 +526,13 @@ def test_dense_collector_separates_branches_and_snapshots_inplace_outputs():
     HookRegistry.get_or_create(adapter).register_hook(collector._HOOK_NAME, collector)
     cache = [{"cond": {"key": torch.zeros(1)}, "uncond": {"key": torch.zeros(1)}} for _ in range(2)]
     modulation = torch.zeros(2, 8)
+    timestep = torch.tensor(0.5)
     for branch in ("cond", "uncond"):
-        output = adapter.run(_input(), modulation, is_decode=True, **_kwargs(cache, branch))
+        output = adapter.run(_input(), modulation, is_decode=True, timestep=timestep, **_kwargs(cache, branch))
         output.fill_(999)  # Caller reuse must not corrupt the collector's history.
     # For cond, output means are 7.5 and 10, so rel-L1 = 2.5 / 7.5.
     doubled = _input() * 2
-    actual = adapter.run(doubled, modulation, is_decode=True, **_kwargs(cache))
+    actual = adapter.run(doubled, modulation, is_decode=True, timestep=timestep, **_kwargs(cache))
     torch.testing.assert_close(actual, _input() * 2 + 5)
     assert len(collector.observations) == 1
     observation = collector.observations[0]

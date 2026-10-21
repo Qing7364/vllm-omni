@@ -72,10 +72,6 @@ CUDA graphs are disabled automatically; evaluate compilation separately.
 
 Two optional keys refine the skip decision:
 
-These policy options have CPU regression coverage; real-checkpoint quality and
-performance confirmation of the in-tree implementation is pending. The measured
-results below describe the earlier policy without either optional key.
-
 - `cfg_rel_l1_thresh` replaces `rel_l1_thresh` for requests with true CFG.
   Both CFG branches see the same decision feature, so they skip on the same
   steps and the guidance scale amplifies the reused residuals' error.
@@ -159,6 +155,29 @@ layouts, so there is no universal speedup over the project default. A separate
 runtime-only numerical diagnostic does not qualify compiled TeaCache or change
 the configuration measured here. Check typography, editing identity, reference
 placement and transparent edges before accepting the numerical result.
+
+The measurements above use no timestep window. The skip policy keys were
+checked afterwards on the same GPU, checkpoint, held-out comparisons, gates and
+frozen coefficients, with `skip_timestep_range=[0.30, 0.855]`. Latency is the
+summed per-request in-process generation time against the matched dense eager
+run; each comparison ran once.
+
+| Configuration | CFG | Passing | Decode steps skipped | Minimum PSNR dB | Latency |
+| --- | --- | --- | --- | --- | --- |
+| `rel_l1_thresh=0.10` | 1 | 16/16 | 32.5% | 31.13 | −30.3% |
+| `cfg_rel_l1_thresh=0.05` | 4 | 16/16 | 7.8% | 30.63 | −5.3% |
+| `cfg_rel_l1_thresh=0.06` | 4 | 14/16 | 14.0% | 29.06 | −12.6% |
+
+At CFG4 with 0.06, both failures are one structure prompt whose PSNR is
+29.1–29.3 dB while SSIM stays at least 0.978 and LPIPS at most 0.008. Only 0.05
+passed every true-CFG comparison in this workload. Skips occurred only at
+denoising steps 13–40 (0-based; prefill is step 0); every step outside the
+window computed. CFG1 outputs were bitwise identical to the earlier exploration
+that forced steps at or below 12 and at or above 41 to compute.
+
+These single-run timings are not HTTP, tail-latency or throughput results.
+Repeat timing with a matched dense eager baseline and review all 48 confirmation
+images before drawing broader quality or performance conclusions.
 
 For an already-loaded pipeline in a single-GPU development harness, install the
 dense collector before running calibration requests:

@@ -180,7 +180,14 @@ def enable_kandinsky6_teacache(pipeline: Any, config: DiffusionCacheConfig) -> N
     )
 
 
+def enable_qwen_image21_teacache(pipeline: Any, config: DiffusionCacheConfig) -> None:
+    from vllm_omni.diffusion.models.qwen_image_21.teacache import enable_qwen_image21_teacache as enable
+
+    enable(pipeline, config)
+
+
 CUSTOM_TEACACHE_ENABLERS = {
+    "QwenImage21Pipeline": enable_qwen_image21_teacache,
     "BagelPipeline": enable_bagel_teacache,
     "Flux2KleinPipeline": enable_flux2_klein_teacache,
     "HunyuanImage3Pipeline": enable_hunyuan_image3_teacache,
@@ -288,7 +295,11 @@ class TeaCacheBackend(CacheBackend):
 
         # Extract transformer from pipeline
         transformer = pipeline.transformer
-        if not hasattr(transformer, "_hook_registry") and hasattr(pipeline, "denoising_transformer"):
+        if pipeline.__class__.__name__ == "QwenImage21Pipeline":
+            # The real transformer can have unrelated hooks; TeaCache belongs
+            # to the decode-only adapter regardless of that registry's presence.
+            transformer = pipeline.denoising_transformer
+        elif not hasattr(transformer, "_hook_registry") and hasattr(pipeline, "denoising_transformer"):
             transformer = pipeline.denoising_transformer
 
         if hasattr(transformer, "_hook_registry"):

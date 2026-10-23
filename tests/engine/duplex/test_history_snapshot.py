@@ -9,6 +9,7 @@ import pytest
 
 from vllm_omni.engine.duplex.config import DuplexPlaybackCommitPolicy, DuplexSessionConfig
 from vllm_omni.engine.duplex.session.engine_session import DuplexEngineSession
+from vllm_omni.engine.duplex.session.playback_ledger import apply_playback_ack
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -337,3 +338,42 @@ def test_truncation_after_snapshot_cleanup_updates_only_its_source(session):
     assert after.source_ids == before.source_ids
     assert after.source_revisions[0] == before.source_revisions[0]
     assert after.source_revisions[1] > before.source_revisions[1]
+
+
+def test_repeated_hard_ack_after_finalization_is_a_revision_noop(session):
+    response_id = session.begin_response()
+    session.append_assistant_text("hello world")
+    session.mark_audio_sent(duration_ms=2000, text_chars=11, audio_complete=True)
+    session.register_history_item(f"item_{response_id}", session.end_response())
+
+    apply_playback_ack(session, {"response_id": response_id, "played_ms": 1000, "truncate": True})
+    before = session.history_snapshot()
+    assert not session._conversation.hard_truncations_ms
+
+    for cutoff in (1000, 1500):
+        apply_playback_ack(session, {"response_id": response_id, "played_ms": cutoff, "truncate": True})
+        assert session.history_snapshot() == before
+
+    # Tightening evidence matters even when integer alignment keeps the text.
+    apply_playback_ack(session, {"response_id": response_id, "played_ms": 999, "truncate": True})
+    after = session.history_snapshot()
+    assert after.messages == before.messages == ({"role": "assistant", "content": "hello"},)
+    assert after.source_ids == before.source_ids
+    assert after.source_revisions[0] > before.source_revisions[0]
+
+
+def test_replacing_finalized_context_revises_removed_cutoff_metadata(session):
+    response_id = session.begin_response()
+    session.append_assistant_text("hello world")
+    session.mark_audio_sent(duration_ms=2000, text_chars=11, audio_complete=True)
+    item_id = f"item_{response_id}"
+    session.register_history_item(item_id, session.end_response())
+    apply_playback_ack(session, {"response_id": response_id, "played_ms": 1000, "truncate": True})
+    before = session.history_snapshot()
+
+    session.register_history_item(item_id, {"role": "assistant", "content": "hello"})
+    after = session.history_snapshot()
+
+    assert after.messages == before.messages
+    assert after.source_ids == before.source_ids
+    assert after.source_revisions[0] > before.source_revisions[0]

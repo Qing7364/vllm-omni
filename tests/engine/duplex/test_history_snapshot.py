@@ -203,8 +203,8 @@ def test_live_session_resume_preserves_source_versions(session):
 
 def test_tighter_hard_cut_updates_revision_even_when_text_is_unchanged(session):
     response_id = session.begin_response()
-    session.append_assistant_text("hello world")
-    session.mark_audio_sent(duration_ms=2000, text_chars=11)
+    session.append_assistant_text("hello worlds")
+    session.mark_audio_sent(duration_ms=2000, text_chars=12)
     session.acknowledge_playback(played_ms=2000)
     message = session.end_response()
     item_id = f"item_{response_id}"
@@ -215,7 +215,7 @@ def test_tighter_hard_cut_updates_revision_even_when_text_is_unchanged(session):
     session.truncate_history_item(item_id, audio_end_ms=1998, hard=True)
     after = session.history_snapshot()
 
-    assert before.messages == after.messages == ({"role": "assistant", "content": "hello worl"},)
+    assert before.messages == after.messages == ({"role": "assistant", "content": "hello world"},)
     assert after.source_ids == before.source_ids
     assert after.source_revisions[0] > before.source_revisions[0]
 

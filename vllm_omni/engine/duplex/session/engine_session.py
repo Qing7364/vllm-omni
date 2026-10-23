@@ -134,6 +134,8 @@ class HistorySource:
     source_id: int
     revision: int = 0
     item_id: str | None = None
+    # Accepted source metadata outlives disposable playback bookkeeping.
+    hard_cutoff_ms: int | None = None
 
 
 @dataclass
@@ -501,12 +503,17 @@ class DuplexEngineSession:
     ) -> None:
         source = self._conversation.sources.get(id(message))
         if source is None:
-            source = HistorySource(source_id=self._conversation.next_source_id, item_id=item_id)
+            source = HistorySource(
+                source_id=self._conversation.next_source_id,
+                item_id=item_id,
+                hard_cutoff_ms=self._conversation.hard_truncations_ms.get(item_id) if item_id is not None else None,
+            )
             self._conversation.next_source_id += 1
             self._conversation.sources[id(message)] = source
         else:
             if item_id is not None and source.item_id != item_id:
                 source.item_id = item_id
+                source.hard_cutoff_ms = self._conversation.hard_truncations_ms.get(item_id)
                 changed = True
             if not changed:
                 return
@@ -526,6 +533,15 @@ class DuplexEngineSession:
         if self._conversation.heard_prefixes.get(item_id) != prefix:
             self._conversation.heard_prefixes[item_id] = prefix
             self._history_item_metadata_changed(item_id)
+
+    def _record_history_hard_cutoff(self, item_id: str, cutoff_ms: int) -> None:
+        message = self._conversation.item_ids.get(item_id)
+        if message is None:
+            return
+        source = self._conversation.sources[id(message)]
+        if source.hard_cutoff_ms is None or cutoff_ms < source.hard_cutoff_ms:
+            source.hard_cutoff_ms = cutoff_ms
+            self._track_history_message(message, changed=True)
 
     @property
     def active_request_id(self) -> str | None:
@@ -1629,6 +1645,11 @@ class DuplexEngineSession:
             self._conversation.item_audio_text_marks.pop(item_id, None)
             prefix = self._conversation.heard_prefixes.pop(item_id, None)
             hard_cut = self._conversation.hard_truncations_ms.pop(item_id, None)
+            stored = self._conversation.item_ids.get(item_id)
+            if stored is not None:
+                source = self._conversation.sources[id(stored)]
+                hard_cut = source.hard_cutoff_ms if source.hard_cutoff_ms is not None else hard_cut
+                source.hard_cutoff_ms = None
             if prefix is not None or hard_cut is not None:
                 self._history_item_metadata_changed(item_id)
             self._conversation.pending_truncations_ms.pop(item_id, None)
@@ -1726,6 +1747,7 @@ class DuplexEngineSession:
             if not hard or audio_end_ms >= cutoff:
                 return False
             text, char_end, cutoff = "", 0, audio_end_ms
+            self._record_history_hard_cutoff(item_id, audio_end_ms)
             self._set_heard_prefix(item_id, (text, char_end, cutoff))
             self._store_history_item_message(item_id, _object_dict(role="assistant", content=text[:char_end]))
             return True
@@ -1737,7 +1759,7 @@ class DuplexEngineSession:
             cap_ms = audio_end_ms if previous_cap_ms is None else min(previous_cap_ms, audio_end_ms)
             if cap_ms != previous_cap_ms:
                 self._conversation.hard_truncations_ms[item_id] = cap_ms
-                self._history_item_metadata_changed(item_id)
+            self._record_history_hard_cutoff(item_id, cap_ms)
         hard_cap_ms = self._conversation.hard_truncations_ms.get(item_id)
         if hard_cap_ms is not None:
             audio_end_ms = min(audio_end_ms, hard_cap_ms)

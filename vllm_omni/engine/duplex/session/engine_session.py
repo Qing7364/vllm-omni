@@ -646,7 +646,7 @@ class DuplexEngineSession:
         ]
         return True
 
-    def release_response_history_snapshot(self, response_id: str | None) -> None:
+    def release_response_history_snapshot(self, response_id: str | None, *, retain_heard_prefix: bool = False) -> None:
         """Release a final response snapshot after its playback fully commits."""
         if response_id is None or response_id == self.active_response_id:
             return
@@ -657,7 +657,8 @@ class DuplexEngineSession:
         self._conversation.pending_item_ids.pop(item_id, None)
         self._conversation.pending_truncations_ms.pop(item_id, None)
         self._conversation.hard_truncations_ms.pop(item_id, None)
-        self._conversation.heard_prefixes.pop(item_id, None)
+        if not retain_heard_prefix:
+            self._conversation.heard_prefixes.pop(item_id, None)
         self._discard_history_item_placeholder(item_id)
 
     def retire_history_calibration(self, response_id: str) -> None:
@@ -680,12 +681,17 @@ class DuplexEngineSession:
         message = self._conversation.item_ids.get(item_id)
         if message is None and item_id in self._conversation.history_item_placeholders:
             message = self._store_history_item_message(item_id, _object_dict(role="assistant", content=""))
-        self.release_response_history_snapshot(response_id)
-        self.release_response_playback(response_id)
-        self._conversation.item_audio_text_marks.pop(item_id, None)
+        retired_prefix: tuple[str, int, int] | None = None
         if message is not None and isinstance(content := message.get("content"), str):
             # Share the stored string; do not retain the original full reply.
-            self._conversation.heard_prefixes[item_id] = (content, len(content), cutoff)
+            retired_prefix = (content, len(content), cutoff)
+        # Keep the accepted evidence through cleanup so an identical retired
+        # prefix remains a revision no-op when compared by _set_heard_prefix.
+        self.release_response_history_snapshot(response_id, retain_heard_prefix=retired_prefix is not None)
+        self.release_response_playback(response_id)
+        self._conversation.item_audio_text_marks.pop(item_id, None)
+        if retired_prefix is not None:
+            self._set_heard_prefix(item_id, retired_prefix)
 
     def history_calibration_retired(self, response_id: str) -> bool:
         return (

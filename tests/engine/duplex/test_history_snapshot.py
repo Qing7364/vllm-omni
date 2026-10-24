@@ -377,3 +377,68 @@ def test_replacing_finalized_context_revises_removed_cutoff_metadata(session):
     assert after.messages == before.messages
     assert after.source_ids == before.source_ids
     assert after.source_revisions[0] > before.source_revisions[0]
+
+
+@pytest.mark.parametrize(
+    ("transcript", "duration_ms", "calibrated", "revision_delta"),
+    [
+        pytest.param("hello world", 2000, False, 1, id="new-prefix"),
+        pytest.param("hello world", 2000, True, 1, id="changed-prefix"),
+        pytest.param("hello", 1000, True, 0, id="identical-prefix"),
+    ],
+)
+def test_retiring_calibration_tracks_prefix_changes(session, transcript, duration_ms, calibrated, revision_delta):
+    session.replace_config(
+        DuplexSessionConfig(model="test-model", playback_commit_policy=DuplexPlaybackCommitPolicy.ACK_ONLY.value)
+    )
+    session.register_history_item("user", {"role": "user", "content": "keep"})
+    response_id = session.begin_response()
+    session.append_assistant_text(transcript)
+    session.mark_audio_sent(duration_ms=duration_ms, text_chars=len(transcript))
+    session.acknowledge_playback(played_ms=1000)
+    session.register_history_item(f"item_{response_id}", session.end_response())
+    if calibrated:
+        assert session.apply_heard_text(response_id, text=transcript, audio_end_ms=1000, char_end=5)
+    before = session.history_snapshot()
+
+    session.retire_history_calibration(response_id)
+    after = session.history_snapshot()
+
+    assert session.history_calibration_retired(response_id)
+    assert (
+        after.messages
+        == before.messages
+        == (
+            {"role": "user", "content": "keep"},
+            {"role": "assistant", "content": "hello"},
+        )
+    )
+    assert after.source_ids == before.source_ids
+    assert after.source_revisions == (before.source_revisions[0], before.source_revisions[1] + revision_delta)
+    assert after.history_revision == before.history_revision + revision_delta
+
+    session.retire_history_calibration(response_id)
+    assert session.history_snapshot() == after
+
+
+def test_retiring_calibration_clears_prefix_after_nontext_replacement(session):
+    session.replace_config(
+        DuplexSessionConfig(model="test-model", playback_commit_policy=DuplexPlaybackCommitPolicy.ACK_ONLY.value)
+    )
+    response_id = session.begin_response()
+    session.append_assistant_text("hello world")
+    session.mark_audio_sent(duration_ms=2000, text_chars=11)
+    session.acknowledge_playback(played_ms=1000)
+    item_id = f"item_{response_id}"
+    session.register_history_item(item_id, session.end_response())
+    assert session.apply_heard_text(response_id, text="hello world", audio_end_ms=1000, char_end=5)
+    session.register_history_item(
+        item_id,
+        {"role": "user", "content": [{"type": "audio_url", "audio_url": {"url": "native-duplex:replacement-audio"}}]},
+    )
+    before = session.history_snapshot()
+
+    session.retire_history_calibration(response_id)
+
+    assert not session.history_calibration_retired(response_id)
+    assert session.history_snapshot() == before

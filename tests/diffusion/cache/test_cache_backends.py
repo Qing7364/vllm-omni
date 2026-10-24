@@ -692,6 +692,7 @@ class TestTeaCacheBackend:
     def test_refresh(self, mock_apply_hook):
         """Test refreshing TeaCache state."""
         mock_pipeline = Mock()
+        del mock_pipeline.denoising_transformer
         mock_pipeline.__class__.__name__ = "QwenImagePipeline"
         mock_transformer = Mock()
         mock_transformer.__class__.__name__ = "QwenImageTransformer2DModel"
@@ -746,6 +747,7 @@ class TestTeaCacheBackend:
     def test_refresh_mammoth_moda2_resets_gen_transformer_hook(self, mock_apply_hook):
         """Refresh should find the hook through the transformer alias set by the enabler."""
         mock_pipeline = Mock()
+        del mock_pipeline.denoising_transformer
         mock_pipeline.__class__.__name__ = "MammothModa2DiTPipeline"
         mock_pipeline.gen_transformer = Mock()
         del mock_pipeline.transformer

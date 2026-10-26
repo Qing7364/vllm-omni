@@ -27,6 +27,7 @@ from vllm_omni.engine.duplex.config import (
     DuplexAssistantAudioTextMark,
     DuplexCapabilities,
     DuplexCommittedInput,
+    DuplexContextViewPolicy,
     DuplexPlaybackCommitPolicy,
     DuplexPlaybackCursor,
     DuplexPlaybackView,
@@ -38,6 +39,9 @@ from vllm_omni.engine.duplex.config import (
 )
 from vllm_omni.engine.duplex.contracts import DuplexFence
 from vllm_omni.engine.duplex.events import TurnEvent
+from vllm_omni.engine.duplex.session.context_ledger import DuplexContextLedger
+from vllm_omni.engine.duplex.session.context_view import DuplexHistoryView
+from vllm_omni.engine.duplex.session.context_view import render_history_view as render_context_view
 from vllm_omni.engine.duplex.session.history_snapshot import DuplexHistorySnapshot, copy_history_message
 from vllm_omni.engine.duplex.session.lease import (
     DuplexLeaseActivity,
@@ -235,6 +239,7 @@ class DuplexEngineSession:
     _pending_stage_metrics: list[dict[str, dict[str, object]]] = field(default_factory=list, repr=False)
     _playback: PlaybackLedger = field(default_factory=PlaybackLedger, repr=False)
     _conversation: ConversationHistory = field(default_factory=ConversationHistory, repr=False)
+    _context_ledger: DuplexContextLedger = field(default_factory=DuplexContextLedger, repr=False)
     model_state: DuplexModelSessionState | None = field(default=None, repr=False)
     projector: RealtimeProjectionState | None = field(default=None, repr=False)
     created_monotonic: float = field(default_factory=time.monotonic)
@@ -499,6 +504,15 @@ class DuplexEngineSession:
             source_revisions=tuple(source.revision for source in sources),
             history_revision=self.history_revision,
         )
+
+    @property
+    def context_ledger(self) -> DuplexContextLedger:
+        """Derived context nodes; they live and die with this session object."""
+        return self._context_ledger
+
+    def render_history_view(self, policy: DuplexContextViewPolicy) -> DuplexHistoryView:
+        """Render a stage's opt-in view from one snapshot; history is not modified."""
+        return render_context_view(self.history_snapshot(), self._context_ledger, policy)
 
     def _track_history_message(
         self, message: dict[str, object], *, item_id: str | None = None, changed: bool = False

@@ -389,9 +389,6 @@ removes the affected nodes and all of their descendants. An epoch change alone
 removes nothing. `add_node` admits a node only if its sources and parents are
 valid against the snapshot it is given, so a result computed from older
 sources is rejected when checked against a current snapshot.
-L1 messages are admitted in a batch that shares one source-revision map;
-rendering also scans the snapshot once to refresh existing nodes. Creating
-many L1 nodes does not rebuild the full revision map for each node.
 
 A plugin opts a stage in by returning a `DuplexContextViewPolicy` from
 `context_view_policy(stage_id=..., runtime_config=...)`. The default is `None`:

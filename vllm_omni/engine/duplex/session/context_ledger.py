@@ -90,12 +90,19 @@ class DuplexContextLedger:
         *,
         messages: Mapping[int, Mapping[str, object]],
     ) -> tuple[DuplexContextNode, ...]:
-        """Admit L1 messages in source order with one shared revision map."""
+        """Admit L1 messages in mapping iteration order.
+
+        Unknown sources or existing valid L1 nodes reject the entire batch.
+        """
         if not messages:
             return ()
         current = _current_revisions(snapshot)
         if any(source_id not in current for source_id in messages):
             raise DuplexContextNodeRejectedError("unknown_source_id")
+        for source_id in messages:
+            existing = self._media_dropped_by_source.get(source_id)
+            if existing is not None and self._valid_against(existing, current, {}):
+                raise DuplexContextNodeRejectedError("source_already_has_media_dropped_node")
         return tuple(
             self._add_node(
                 current,

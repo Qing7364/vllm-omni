@@ -108,6 +108,39 @@ def test_l1_batch_keeps_individual_duplicate_admission_rule(session):
     assert ledger.nodes() == (existing,)
 
 
+def test_l1_batch_rejects_late_duplicate_without_writes_or_consuming_ids(session):
+    session.register_history_item("u1", _user("one"))
+    session.register_history_item("u2", _user("two"))
+    snapshot = session.history_snapshot()
+    first, second = snapshot.source_ids
+    ledger = DuplexContextLedger()
+    existing = _l1(ledger, snapshot, 1)
+
+    with pytest.raises(DuplexContextNodeRejectedError, match="source_already_has_media_dropped_node"):
+        ledger.add_l1_nodes(snapshot, messages={first: _user("derived one"), second: _user("duplicate two")})
+
+    assert ledger.nodes() == (existing,)
+    assert ledger.l1_node_for(first) is None
+    (admitted,) = ledger.add_l1_nodes(snapshot, messages={first: _user("derived one")})
+    assert admitted.node_id == existing.node_id + 1
+
+
+def test_l1_batch_accepts_replacement_for_stale_existing_node(session):
+    session.register_history_item("u1", _user("one"))
+    ledger = DuplexContextLedger()
+    old = _l1(ledger, session.history_snapshot(), 0)
+    session.register_history_item("u1", _user("edited"))
+    current = session.history_snapshot()
+    source_id = current.source_ids[0]
+
+    (replacement,) = ledger.add_l1_nodes(current, messages={source_id: _user("derived edited")})
+
+    assert replacement.sources[0].revision == current.source_revisions[0]
+    assert replacement.sources[0].revision > old.sources[0].revision
+    assert ledger.refresh(current) == (old.node_id,)
+    assert ledger.l1_node_for(source_id) == replacement
+
+
 def _setup_replacement(session: DuplexEngineSession) -> Callable[[], object]:
     session.register_history_item("u1", _user("hi"))
     return lambda: session.register_history_item("u1", _user("edited"))

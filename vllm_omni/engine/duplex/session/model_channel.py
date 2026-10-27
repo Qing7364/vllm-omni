@@ -418,7 +418,10 @@ class ModelChannel:
             snapshot = session.history_snapshot()
             prompt_session = {
                 **request_context.session_config,
-                "conversation": list(snapshot.messages),
+                # Keep the prompt accessor's nested content identity: Qwen
+                # binds retained PCM to those containers. Both history reads
+                # are synchronous on the owner loop, so item IDs stay aligned.
+                "conversation": list(session.history),
                 "conversation_item_ids": snapshot.item_ids,
                 "modalities": list(session.response_config.modalities),
             }

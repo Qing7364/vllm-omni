@@ -95,10 +95,10 @@ async def test_render_skipped_without_policy(monkeypatch):
     try:
         _seed_history(h.session)
 
-        def _fail() -> None:
-            raise AssertionError("history_snapshot() must not run without a policy")
+        def _fail(policy: DuplexContextViewPolicy) -> None:
+            raise AssertionError("render_history_view() must not run without a policy")
 
-        monkeypatch.setattr(h.session, "history_snapshot", _fail)
+        monkeypatch.setattr(h.session, "render_history_view", _fail)
         await h.run(append_audio())
 
         assert len(plugin.prompt_configs) == 1

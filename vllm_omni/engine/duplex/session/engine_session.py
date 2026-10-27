@@ -216,6 +216,8 @@ class DuplexEngineSession:
     _runtime_config: dict[str, object] = field(default_factory=dict, repr=False)
     #: Bumped on every published session / runtime config change.
     config_generation: int = 0
+    #: User session settings, separate from model-owned chunk/tool state.
+    config_revision: int = 0
     #: Stage request ids reserved or submitted for this session, keyed by ``(stage_id, request_id)``.
     request_resources: dict[tuple[int, str], DuplexRequestResource] = field(default_factory=dict, repr=False)
     #: Highest fence accepted for a stage request (monotonic; reset of the append
@@ -715,6 +717,7 @@ class DuplexEngineSession:
         previous_seed = self.config.initial_user_text
         self.config = config
         self.config_generation += 1
+        self.config_revision += 1
         if config.initial_user_text and config.initial_user_text != previous_seed:
             self.notify_new_user_item()
 
@@ -736,6 +739,8 @@ class DuplexEngineSession:
         self.config = previous
         if self.config_generation > 0:
             self.config_generation -= 1
+        if self.config_revision > 0:
+            self.config_revision -= 1
 
     def transition_turn(self, state: DuplexTurnState) -> None:
         self.turn_state = state

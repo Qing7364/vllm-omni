@@ -144,6 +144,8 @@ class ConversationHistory:
     revision: int = 0
     next_source_id: int = 0
     # Keys are identities of live message dictionaries, never public item IDs.
+    # Every non-placeholder insertion must call _track_history_message;
+    # removing one must call _forget_history_message. Placeholders are untracked.
     sources: dict[int, HistorySource] = field(default_factory=dict)
     #: User items added by ``conversation.item.create`` that no response has
     #: answered yet. A turn can start from these alone, the way the Realtime
@@ -491,6 +493,7 @@ class DuplexEngineSession:
         """Capture content and identities together, without yielding ownership."""
         placeholders = {id(message) for message in self._conversation.history_item_placeholders.values()}
         messages = tuple(message for message in self._conversation.messages if id(message) not in placeholders)
+        # The source-map invariant covers every non-placeholder message.
         sources = tuple(self._conversation.sources[id(message)] for message in messages)
         return DuplexHistorySnapshot(
             messages=tuple(copy_history_message(message) for message in messages),
@@ -540,6 +543,7 @@ class DuplexEngineSession:
         message = self._conversation.item_ids.get(item_id)
         if message is None:
             return
+        # Public item IDs refer to tracked, non-placeholder history messages.
         source = self._conversation.sources[id(message)]
         if source.hard_cutoff_ms is None or cutoff_ms < source.hard_cutoff_ms:
             source.hard_cutoff_ms = cutoff_ms

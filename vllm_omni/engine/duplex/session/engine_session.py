@@ -138,7 +138,7 @@ class PlaybackLedger:
 class HistorySource:
     source_id: int
     # Keep identity alive until the source is explicitly forgotten.
-    message: dict[str, object] = field(repr=False)
+    message: dict[str, object] = field(repr=False, compare=False)
     revision: int = 0
     item_id: str | None = None
     # Authoritative playback metadata also versions assistant-derived context,

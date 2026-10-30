@@ -621,6 +621,8 @@ class StageDeployConfig:
     # Diffusion model loading and adapter construction.
     model_class_name: str | None = None
     diffusion_load_format: str | None = None
+    controlnet_model_path: str | None = None
+    """Local original H3 Fun ControlNet Union safetensors checkpoint."""
     lora_path: str | list[str] | None = None
     lora_backend: str | None = None
     lora_scale: float | None = None
@@ -742,8 +744,14 @@ class DuplexSessionRuntimeConfig:
     # (Qwen3-Omni): user turns before the N most recent user runs drop their
     # audio and image parts there. ``None`` leaves every prompt unchanged.
     context_keep_media_turns: int | None = None
+    # Record per-turn stage work and emitted audio and answer the client's
+    # ``session.stats.get`` (RFC #8325). Off: nothing is recorded or attached.
+    # Single-host only: stage and API timestamps share one CLOCK_MONOTONIC.
+    collect_stats: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.collect_stats, bool):
+            raise ValueError("duplex_session.collect_stats must be a boolean")
         if self.replica_policy not in ("legacy", "least_sessions"):
             raise ValueError("duplex_session.replica_policy must be 'legacy' or 'least_sessions'")
         if self.max_sessions_per_replica is not None and (

@@ -48,6 +48,7 @@ from vllm_omni.engine.duplex.session.lease import (
     DuplexLeaseConfig,
     DuplexLeaseState,
 )
+from vllm_omni.engine.duplex.session.perf_ledger import SessionPerfLedger
 from vllm_omni.metrics.stats import (
     DUPLEX_STAGE_TABLE_EXCLUDE,
     OrchestratorAggregator,
@@ -251,6 +252,9 @@ class DuplexEngineSession:
     #: ``StageRequestStats`` that arrived before ``begin_response`` (stage 0
     #: feeding TTS). Replayed onto the aggregator when the response opens.
     _pending_stage_request_stats: list[tuple[int, StageRequestStats]] = field(default_factory=list, repr=False)
+    #: Server-side stage work and audio by turn and chunk (RFC #8325); None when
+    #: the deployment does not collect session stats.
+    perf: SessionPerfLedger | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.accepted_fence is None:
@@ -966,6 +970,8 @@ class DuplexEngineSession:
         if completed_turn_id >= self.turn_id:
             self.turn_id = completed_turn_id + 1
             self.sync_fence()
+        if self.perf is not None:
+            self.perf.close_turns(epoch=self.epoch, up_to_turn_id=completed_turn_id)
 
     def _bind_active_response_to_input_commit(self, input_commit_seq: int) -> None:
         if self.active_response_id is not None and self._response.active_response_awaits_input_commit:
@@ -1066,6 +1072,10 @@ class DuplexEngineSession:
         self._playback.by_response[response_id] = self._playback.current
         self.turn_state = DuplexTurnState.ASSISTANT_GENERATING
         self._start_response_aggregator()
+        if self.perf is not None:
+            self.perf.bind_response(
+                epoch=self.epoch, turn_id=self._response.active_response_turn_id, response_id=response_id
+            )
         return response_id
 
     def _clear_response_metrics(self) -> None:
@@ -1573,6 +1583,8 @@ class DuplexEngineSession:
     ) -> dict[str, object] | None:
         self._log_response_aggregator()
         response_id = self._response.active_response_id
+        if self.perf is not None and response_id is not None:
+            self.perf.end_response(response_id)
         response_input_commit_seq = self._response.active_response_input_commit_seq
         if response_input_commit_seq is None:
             response_input_commit_seq = self.input_commit_seq
@@ -2023,6 +2035,8 @@ class DuplexEngineSession:
 
     def barge_in(self) -> int:
         self._log_response_aggregator()
+        if self.perf is not None:
+            self.perf.cancel_epoch(self.epoch)
         self.epoch += 1
         self.sync_fence()
         self._response.assistant_text_buffer.clear()
@@ -2046,6 +2060,8 @@ class DuplexEngineSession:
 
     def close(self) -> None:
         self._log_response_aggregator()
+        if self.perf is not None:
+            self.perf.close_all()
         self.state = DuplexSessionState.CLOSED
         self.release_buffered_input_bytes()
         self._input.queued_input_bytes = 0
@@ -2104,6 +2120,7 @@ class DuplexEngineSession:
             "overlap_barge_in_ms": self.config.overlap_barge_in_ms,
             "overlap_silence_rms": self.config.overlap_silence_rms,
             "playback_commit_policy": self.config.playback_commit_policy,
+            "watermarking": self.config.watermarking,
             "playback": self.playback.as_dict(),
             "capabilities": self.capabilities.as_dict(),
         }

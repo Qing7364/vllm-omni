@@ -40,6 +40,11 @@ def _l1(ledger: DuplexContextLedger, snapshot: DuplexHistorySnapshot, index: int
     )
 
 
+def _batch_l1(ledger: DuplexContextLedger, snapshot: DuplexHistorySnapshot, index: int) -> DuplexContextNode:
+    (node,) = ledger.add_l1_nodes(snapshot, messages={snapshot.source_ids[index]: dict(snapshot.messages[index])})
+    return node
+
+
 def _summary(
     ledger: DuplexContextLedger,
     snapshot: DuplexHistorySnapshot,
@@ -139,6 +144,31 @@ def test_l1_batch_accepts_replacement_for_stale_existing_node(session):
     assert replacement.sources[0].revision > old.sources[0].revision
     assert ledger.refresh(current) == (old.node_id,)
     assert ledger.l1_node_for(source_id) == replacement
+
+
+@pytest.mark.parametrize("admit_current", [_l1, _batch_l1], ids=["single-current", "batch-current"])
+@pytest.mark.parametrize("admit_old", [_l1, _batch_l1], ids=["single-old", "batch-old"])
+def test_historical_admission_preserves_newer_l1_index(session, admit_current, admit_old):
+    session.register_history_item("u1", _user("old"))
+    old = session.history_snapshot()
+    session.register_history_item("u1", _user("current"))
+    current = session.history_snapshot()
+    source_id = current.source_ids[0]
+    ledger = DuplexContextLedger()
+    newest = admit_current(ledger, current, 0)
+
+    historical = admit_old(ledger, old, 0)
+
+    assert ledger.l1_node_for(source_id) == newest
+    for duplicate_api in (_l1, _batch_l1):
+        with pytest.raises(DuplexContextNodeRejectedError, match="source_already_has_media_dropped_node"):
+            duplicate_api(ledger, old, 0)
+    assert ledger.refresh(current) == (historical.node_id,)
+    assert ledger.l1_node_for(source_id) == newest
+    for duplicate_api in (_l1, _batch_l1):
+        with pytest.raises(DuplexContextNodeRejectedError, match="source_already_has_media_dropped_node"):
+            duplicate_api(ledger, current, 0)
+    assert ledger.nodes() == (newest,)
 
 
 def _setup_replacement(session: DuplexEngineSession) -> Callable[[], object]:

@@ -78,7 +78,8 @@ class DuplexContextLedger:
         """Admit a node only if it is valid against ``snapshot``.
 
         Validation does not prune: a snapshot older than the last refresh must
-        not discard nodes built from newer revisions.
+        not discard nodes built from newer revisions or displace their L1 lookup.
+        At most one L1 node is admitted per source revision between refreshes.
         """
         return self._add_node(
             _current_revisions(snapshot), level=level, sources=sources, parents=parents, message=message
@@ -100,8 +101,7 @@ class DuplexContextLedger:
         if any(source_id not in current for source_id in messages):
             raise DuplexContextNodeRejectedError("unknown_source_id")
         for source_id in messages:
-            existing = self._media_dropped_by_source.get(source_id)
-            if existing is not None and self._valid_against(existing, current, {}):
+            if self._has_l1_revision(source_id, current[source_id]):
                 raise DuplexContextNodeRejectedError("source_already_has_media_dropped_node")
         return tuple(
             self._add_node(
@@ -124,14 +124,13 @@ class DuplexContextLedger:
     ) -> DuplexContextNode:
         if not sources and not parents:
             raise DuplexContextNodeRejectedError("node_has_no_dependencies")
+        if not _sources_current(sources, current):
+            raise DuplexContextNodeRejectedError("stale_source_revision")
         if level is DuplexContextLevel.MEDIA_DROPPED:
             if len(sources) != 1 or parents:
                 raise DuplexContextNodeRejectedError("media_dropped_node_needs_exactly_one_source")
-            existing = self._media_dropped_by_source.get(sources[0].source_id)
-            if existing is not None and self._valid_against(existing, current, {}):
+            if self._has_l1_revision(sources[0].source_id, sources[0].revision):
                 raise DuplexContextNodeRejectedError("source_already_has_media_dropped_node")
-        if not _sources_current(sources, current):
-            raise DuplexContextNodeRejectedError("stale_source_revision")
         memo: dict[int, bool] = {}
         if not all(self._valid_against(parent, current, memo) for parent in parents):
             raise DuplexContextNodeRejectedError("parent_not_valid")
@@ -145,11 +144,26 @@ class DuplexContextLedger:
         self._next_node_id += 1
         self._nodes[node.node_id] = node
         if level is DuplexContextLevel.MEDIA_DROPPED:
-            self._media_dropped_by_source[sources[0].source_id] = node.node_id
+            existing = self.l1_node_for(sources[0].source_id)
+            if existing is None or existing.sources[0].revision < sources[0].revision:
+                self._media_dropped_by_source[sources[0].source_id] = node.node_id
         return node
 
+    def _has_l1_revision(self, source_id: int, revision: int) -> bool:
+        existing = self.l1_node_for(source_id)
+        if existing is None or existing.sources[0].revision < revision:
+            return False
+        if existing.sources[0].revision == revision:
+            return True
+        # Only out-of-order historical admission needs a scan. The synchronous
+        # current-snapshot renderer uses the indexed newest revision above.
+        return any(
+            node.level is DuplexContextLevel.MEDIA_DROPPED and node.sources[0] == DuplexSourceRef(source_id, revision)
+            for node in self._nodes.values()
+        )
+
     def refresh(self, snapshot: DuplexHistorySnapshot) -> tuple[int, ...]:
-        """Prune nodes invalid against ``snapshot``; return their IDs in order."""
+        """Prune against a current authoritative snapshot; return IDs in order."""
         current = _current_revisions(snapshot)
         removed: list[int] = []
         # Insertion order is ascending node ID, so parents are decided first.

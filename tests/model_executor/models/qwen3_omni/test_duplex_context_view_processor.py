@@ -8,6 +8,8 @@ are loaded. Populate the pinned checkpoint's HF cache before running, or set
 QWEN3_OMNI_PROCESSOR_PATH to its ``snapshots/<revision>`` directory. Missing
 optional cached assets skip; an explicit path must load successfully. All HF
 loads are local-only, and an explicit path must name the pinned revision.
+The ready pipeline's Model Executor CPU job prefetches these assets and sets
+QWEN3_OMNI_PROCESSOR_REQUIRED=1, making cache failures errors instead of skips.
 """
 
 from __future__ import annotations
@@ -65,7 +67,7 @@ def qwen_processor(record_testsuite_property) -> Qwen3OmniMoeProcessor:
             trust_remote_code=False,
         )
     except OSError:
-        if override is not None:
+        if override is not None or os.environ.get("QWEN3_OMNI_PROCESSOR_REQUIRED") == "1":
             raise
         pytest.skip(
             f"Optional processor assets for {PROCESSOR_MODEL}@{PROCESSOR_REVISION} are not cached; "

@@ -900,20 +900,24 @@ class Qwen3OmniDuplexPlugin(DuplexModelPlugin):
         # payload can never overwrite an earlier, already answered utterance.
         current_contents = []
         current_turn_start = len(history)
-        for index, message in reversed(list(enumerate(history))):
-            if message.get("role") != "user":
-                break
-            current_turn_start = index
-            content = message.get("content")
-            # Tool history limits new payload binding, not which unanswered
-            # question a tool continuation still needs to see.
-            if (
-                has_audio
-                and index >= bind_from
-                and isinstance(content, list)
-                and any(part.get("type") == "audio_url" for part in content)
-            ):
-                current_contents.append(content)
+        if view is not None:
+            # System instructions do not answer a pending user question.
+            # Protect its media even when they follow the user item.
+            for index in range(len(history) - 1, -1, -1):
+                role = history[index].get("role")
+                if role == "assistant":
+                    break
+                if role == "user":
+                    current_turn_start = index
+        if has_audio:
+            # Keep payload binding on its existing trailing-user boundary;
+            # formatting protection above has a separate responsibility.
+            for index, message in reversed(list(enumerate(history))):
+                if index < bind_from or message.get("role") != "user":
+                    break
+                content = message.get("content")
+                if isinstance(content, list) and any(part.get("type") == "audio_url" for part in content):
+                    current_contents.append(content)
         current_is_in_history = bool(current_contents)
         if current_is_in_history:
             # The runner concatenates multiple commits made before a response.

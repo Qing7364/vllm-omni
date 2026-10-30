@@ -392,7 +392,7 @@ sources is rejected when checked against a current snapshot.
 
 A plugin opts a stage in by returning a `DuplexContextViewPolicy` from
 `context_view_policy(stage_id=..., runtime_config=...)`. The default is `None`:
-the prompt config is built exactly as before and no snapshot is taken. With a
+the prompt config is built exactly as before and no L1 view is rendered. With a
 policy, `conversation` stays the authoritative history and the stage also
 receives `conversation_view`, a list aligned one-to-one with `conversation`:
 
@@ -414,7 +414,8 @@ Dropped images are never decoded, and a text-only view replaces old audio
 even while its payload remains in the retained audio slots. A turn whose
 audio left those slots keeps its available transcript instead of being
 dropped. The current unanswered user input remains verbatim, including during
-tool continuations and for audio and image items when the knob is `0`.
+tool continuations, after intervening system instructions, and for audio and
+image items when the knob is `0`.
 The 16-message window, the
 audio-slot limits and the no-empty-run fallback are unchanged.
 

@@ -144,6 +144,25 @@ def test_qwen3_ignores_misaligned_view():
     assert _plain(prepared["qwen_messages"]) == CAMERA_SESSION_PROMPT
 
 
+def test_current_retained_audio_survives_system_item_before_response():
+    conversation = Conversation(keep_media_user_turns=0)
+    conversation.audio("u1", "A1", transcript="current question")
+    conversation.session.append_history_message({"role": "system", "content": "answer briefly"})
+    config = {
+        "conversation": list(conversation.session.history),
+        "conversation_view": list(conversation.session.render_history_view(conversation.policy).messages),
+    }
+
+    prepared = conversation.plugin.prepare_prompt_config(
+        config, state=conversation.state, payload={"type": "conversation"}
+    )
+
+    assert _plain(prepared["qwen_messages"]) == [
+        {"role": "user", "audio": "A1", "_src": 0},
+        {"role": "system", "content": "answer briefly", "_src": 1},
+    ]
+
+
 def test_qwen3_skips_old_image_items_with_knob_on():
     messages = _camera_session(Conversation(keep_media_user_turns=1))
 

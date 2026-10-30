@@ -158,3 +158,44 @@ async def test_keep_zero_preserves_current_image_during_tool_followup():
         assert len(prompt["multi_modal_data"].get("image", [])) == 1
     finally:
         await close_harness(h)
+
+
+@pytest.mark.parametrize("keep", [None, 0])
+async def test_current_image_survives_system_item_before_response(keep):
+    h = await _open(keep)
+    try:
+        await h.run(
+            CreateItem(
+                item=normalize_conversation_item(
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "describe this picture"},
+                            {"type": "input_image", "image_url": _image()["image_url"]["url"]},
+                        ],
+                    }
+                )
+            )
+        )
+        await h.run(
+            CreateItem(
+                item=normalize_conversation_item(
+                    {
+                        "type": "message",
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": "answer briefly"}],
+                    }
+                )
+            )
+        )
+
+        await h.run(CreateResponse())
+
+        assert len(h.port.submissions) == 1
+        prompt = h.port.submissions[-1].prompt
+        assert "describe this picture" in prompt["prompt"]
+        assert "answer briefly" in prompt["prompt"]
+        assert len(prompt["multi_modal_data"].get("image", [])) == 1
+    finally:
+        await close_harness(h)

@@ -431,11 +431,15 @@ class ModelChannel:
             }
             prompt_session.update(self._ctx.plugin.extra_prompt_config(request_context.runtime_config))
             prompt_session["stage_sampling_params"] = request_context.sampling_params
+            # View policy is deployment-owned; request runtime config above
+            # contains the plugin's per-request state (for example tool turns).
             view_policy = self._ctx.plugin.context_view_policy(
                 stage_id=stage_id, runtime_config=self._ctx.manager.runtime_config
             )
             if view_policy is not None:
-                prompt_session["conversation_view"] = list(session.render_history_view(view_policy).messages)
+                prompt_session["conversation_view"] = list(
+                    session.render_history_view(view_policy, snapshot=snapshot).messages
+                )
             append_plan = await self._ctx.plugin.prepare_append_plan(
                 request_id=request_id,
                 fence=fence,

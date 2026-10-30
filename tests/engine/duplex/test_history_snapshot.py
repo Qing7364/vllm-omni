@@ -35,6 +35,24 @@ def test_snapshot_aligns_unbound_and_registered_sources(session):
     assert snapshot.history_revision == session.history_revision
 
 
+def test_snapshot_rejects_misbound_source_identity(session):
+    first = {"role": "user", "content": "first"}
+    second = {"role": "user", "content": "second"}
+    session.register_history_item("first", first)
+    session.register_history_item("second", second)
+    session._conversation.sources[id(second)] = session._conversation.sources[id(first)]
+
+    with pytest.raises(RuntimeError, match="history_source_tracking_invariant"):
+        session.history_snapshot()
+
+
+def test_snapshot_rejects_untracked_visible_message(session):
+    session._conversation.messages.append({"role": "user", "content": "untracked"})
+
+    with pytest.raises(RuntimeError, match="history_source_tracking_invariant"):
+        session.history_snapshot()
+
+
 def test_old_snapshot_keeps_nested_content_after_source_replacement(session):
     session.register_history_item("user", {"role": "user", "content": [{"type": "text", "text": "before"}]})
     before = session.history_snapshot()

@@ -137,9 +137,13 @@ class PlaybackLedger:
 @dataclass
 class HistorySource:
     source_id: int
+    # Keep identity alive until the source is explicitly forgotten.
+    message: dict[str, object] = field(repr=False)
     revision: int = 0
     item_id: str | None = None
-    # Accepted source metadata outlives disposable playback bookkeeping.
+    # Authoritative playback metadata also versions assistant-derived context,
+    # even when an L1 rendering happens to retain exactly the same text.
+    # It outlives disposable playback bookkeeping.
     hard_cutoff_ms: int | None = None
 
 
@@ -500,7 +504,7 @@ class DuplexEngineSession:
         """Capture content and identities together, without yielding ownership."""
         placeholders = {id(message) for message in self._conversation.history_item_placeholders.values()}
         messages = tuple(message for message in self._conversation.messages if id(message) not in placeholders)
-        sources = tuple(self._conversation.sources[id(message)] for message in messages)
+        sources = tuple(self._history_source(message) for message in messages)
         return DuplexHistorySnapshot(
             messages=tuple(copy_history_message(message) for message in messages),
             item_ids=tuple(source.item_id for source in sources),
@@ -514,9 +518,19 @@ class DuplexEngineSession:
         """Derived context nodes; they live and die with this session object."""
         return self._context_ledger
 
-    def render_history_view(self, policy: DuplexContextViewPolicy) -> DuplexHistoryView:
+    def render_history_view(
+        self, policy: DuplexContextViewPolicy, *, snapshot: DuplexHistorySnapshot | None = None
+    ) -> DuplexHistoryView:
         """Render a stage's opt-in view from one snapshot; history is not modified."""
-        return render_context_view(self.history_snapshot(), self._context_ledger, policy)
+        if snapshot is None:
+            snapshot = self.history_snapshot()
+        return render_context_view(snapshot, self._context_ledger, policy)
+
+    def _history_source(self, message: dict[str, object]) -> HistorySource:
+        source = self._conversation.sources.get(id(message))
+        if source is None or source.message is not message:
+            raise RuntimeError("history_source_tracking_invariant")
+        return source
 
     def _track_history_message(
         self, message: dict[str, object], *, item_id: str | None = None, changed: bool = False
@@ -525,12 +539,14 @@ class DuplexEngineSession:
         if source is None:
             source = HistorySource(
                 source_id=self._conversation.next_source_id,
+                message=message,
                 item_id=item_id,
                 hard_cutoff_ms=self._conversation.hard_truncations_ms.get(item_id) if item_id is not None else None,
             )
             self._conversation.next_source_id += 1
             self._conversation.sources[id(message)] = source
         else:
+            source = self._history_source(message)
             if item_id is not None and source.item_id != item_id:
                 source.item_id = item_id
                 source.hard_cutoff_ms = self._conversation.hard_truncations_ms.get(item_id)
@@ -541,7 +557,9 @@ class DuplexEngineSession:
         self._conversation.revision += 1
 
     def _forget_history_message(self, message: dict[str, object]) -> None:
-        if self._conversation.sources.pop(id(message), None) is not None:
+        if id(message) in self._conversation.sources:
+            self._history_source(message)
+            del self._conversation.sources[id(message)]
             self._conversation.revision += 1
 
     def _history_item_metadata_changed(self, item_id: str) -> None:
@@ -558,7 +576,7 @@ class DuplexEngineSession:
         message = self._conversation.item_ids.get(item_id)
         if message is None:
             return
-        source = self._conversation.sources[id(message)]
+        source = self._history_source(message)
         if source.hard_cutoff_ms is None or cutoff_ms < source.hard_cutoff_ms:
             source.hard_cutoff_ms = cutoff_ms
             self._track_history_message(message, changed=True)
@@ -1684,7 +1702,7 @@ class DuplexEngineSession:
             hard_cut = self._conversation.hard_truncations_ms.pop(item_id, None)
             stored = self._conversation.item_ids.get(item_id)
             if stored is not None:
-                source = self._conversation.sources[id(stored)]
+                source = self._history_source(stored)
                 hard_cut = source.hard_cutoff_ms if source.hard_cutoff_ms is not None else hard_cut
                 source.hard_cutoff_ms = None
             if prefix is not None or hard_cut is not None:

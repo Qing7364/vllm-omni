@@ -108,6 +108,32 @@ async def test_render_skipped_without_policy(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_opted_in_append_captures_history_once(monkeypatch):
+    plugin = RecordingPlugin({0: DuplexContextViewPolicy(keep_media_user_turns=0)})
+    h = await open_harness(plugin=plugin)
+    try:
+        _seed_history(h.session)
+        original = h.session.history_snapshot
+        snapshots = []
+
+        def capture():
+            snapshot = original()
+            snapshots.append(snapshot)
+            return snapshot
+
+        monkeypatch.setattr(h.session, "history_snapshot", capture)
+        await h.run(append_audio())
+
+        assert len(h.port.submissions) == 1
+        assert len(snapshots) == 1
+        config = plugin.prompt_configs[0]
+        assert config["conversation_item_ids"] == snapshots[0].item_ids
+        assert _messages(config["conversation_view"])[0]["content"] == [{"type": "text", "text": "earlier"}]
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
 async def test_conversation_authoritative_with_policy():
     baseline_plugin = RecordingPlugin()
     baseline, _ = await _first_prompt_config(baseline_plugin)

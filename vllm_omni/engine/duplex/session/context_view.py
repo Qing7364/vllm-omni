@@ -19,6 +19,10 @@ class DuplexHistoryView:
 
     ``node_ids[i]`` is the L1 node rendered at position ``i``, or ``None``
     where the snapshot message is passed through verbatim.
+
+    This candidate context view can drop unanswered input's media when the
+    policy keeps zero user runs. Consumers must preserve current request input
+    from authoritative ``conversation`` and bind media payloads against it.
     """
 
     messages: tuple[dict[str, object], ...]

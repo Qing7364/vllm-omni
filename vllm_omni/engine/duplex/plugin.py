@@ -692,7 +692,12 @@ class DuplexModelPlugin(ABC):
     def context_view_policy(
         self, *, stage_id: int, runtime_config: DuplexSessionRuntimeConfig
     ) -> DuplexContextViewPolicy | None:
-        """Opt one stage in to ``conversation_view``; ``None`` keeps the verbatim prompt path."""
+        """Opt a stage in to a candidate context view using deployment config.
+
+        ``None`` keeps the verbatim prompt path. Consumers must bind payloads
+        and preserve current request media against authoritative ``conversation``;
+        a zero-keep policy can drop that media in ``conversation_view`` itself.
+        """
         del stage_id, runtime_config
         return None
 

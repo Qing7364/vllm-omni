@@ -224,7 +224,10 @@ class DuplexContextViewPolicy:
 
     User messages before the Nth most recent user run (consecutive user
     messages) render without audio and image parts. With N == 0, every user
-    run is eligible.
+    run is eligible, including unanswered input. This is a candidate context
+    view: consumers must preserve current request media from authoritative
+    ``conversation`` and bind payloads there, rather than directly formatting
+    the entire view as a complete prompt.
     """
 
     keep_media_user_turns: int

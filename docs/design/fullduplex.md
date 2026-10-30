@@ -388,7 +388,11 @@ update, a deleted source, an accepted heard prefix or a tighter hard cutoff
 removes the affected nodes and all of their descendants. An epoch change alone
 removes nothing. `add_node` admits a node only if its sources and parents are
 valid against the snapshot it is given, so a result computed from older
-sources is rejected when checked against a current snapshot.
+sources is rejected when checked against a current snapshot. Admission with
+a historical snapshot does not displace a newer L1 source lookup; duplicate
+L1 nodes for the same source revision are rejected through either admission
+API. Callers refresh against a current authoritative snapshot before reading
+valid nodes.
 
 A plugin opts a stage in by returning a `DuplexContextViewPolicy` from
 `context_view_policy(stage_id=..., runtime_config=...)`. The default is `None`:
@@ -405,7 +409,12 @@ receives `conversation_view`, a list aligned one-to-one with `conversation`:
 - Assistant, system and tool messages are never rewritten. Assistant text
   already reflects the accepted heard prefix.
 
-Plugins keep binding audio and validating sources against `conversation`.
+This is a candidate context view, not a complete prompt: with a zero-keep
+policy, unanswered input is eligible too. Plugins must preserve current
+request media from `conversation`, and keep binding audio and validating
+sources against it. ModelChannel reuses the snapshot captured for item IDs
+when rendering the view, so both come from the same capture. Policy config
+is deployment-owned; plugin request runtime state is a separate input.
 
 Qwen3-Omni opts in its Thinker stage when
 `duplex_session.context_keep_media_turns` is set (default `null`). It then
